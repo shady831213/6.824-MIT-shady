@@ -64,6 +64,7 @@ func doReduce(
 	defer output.Close()
 	enc := json.NewEncoder(output)
 
+	keyValues := make(map[string][]string)
 	for i := 0; i < nMap; i ++ {
 		f, err := os.Open(reduceName(jobName, i, reduceTask))
 		if err != nil {
@@ -75,7 +76,6 @@ func doReduce(
 		}
 		inputs = append(inputs, f)
 		//decode
-		keyValues := make(map[string][]string)
 		dec := json.NewDecoder(f)
 		for {
 			var kv KeyValue
@@ -88,11 +88,10 @@ func doReduce(
 			}
 			keyValues[kv.Key] = append(keyValues[kv.Key], kv.Value)
 		}
-		//can reduce here, because one key can only be in one file(ihash)
-		for k := range keyValues {
-			if err := enc.Encode(KeyValue{k, reduceF(k, keyValues[k])}); err != nil {
-				panic(err)
-			}
+	}
+	for k := range keyValues {
+		if err := enc.Encode(KeyValue{k, reduceF(k, keyValues[k])}); err != nil {
+			panic(err)
 		}
 	}
 }
