@@ -1,10 +1,15 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"os"
+)
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
 	outFile string, // write the output here
-	nMap int, // the number of map tasks that were run ("M" in the paper)
+	nMap int,       // the number of map tasks that were run ("M" in the paper)
 	reduceF func(key string, values []string) string,
 ) {
 	//
@@ -44,4 +49,50 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+	//input files
+	inputs := make([]*os.File, 0)
+	defer func() {
+		for _, f := range inputs {
+			f.Close()
+		}
+	}()
+	//output file
+	output, err := os.Create(mergeName(jobName, reduceTask))
+	if err != nil {
+		panic(err)
+	}
+	defer output.Close()
+	enc := json.NewEncoder(output)
+
+	for i := 0; i < nMap; i ++ {
+		f, err := os.Open(reduceName(jobName, i, reduceTask))
+		if err != nil {
+			//no map file generated
+			if os.IsNotExist(err) {
+				continue
+			}
+			panic(err)
+		}
+		inputs = append(inputs, f)
+		//decode
+		keyValues := make(map[string][]string)
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			err = dec.Decode(&kv)
+			if err != nil {
+				break
+			}
+			if _, ok := keyValues[kv.Key]; !ok {
+				keyValues[kv.Key] = make([]string, 0)
+			}
+			keyValues[kv.Key] = append(keyValues[kv.Key], kv.Value)
+		}
+		//can reduce here, because one key can only be in one file(ihash)
+		for k := range keyValues {
+			if err := enc.Encode(KeyValue{k, reduceF(k, keyValues[k])}); err != nil {
+				panic(err)
+			}
+		}
+	}
 }
