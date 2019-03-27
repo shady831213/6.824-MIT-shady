@@ -3,6 +3,7 @@ package mapreduce
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 //
@@ -38,25 +39,33 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		wg.Add(1)
 		go func(taskNumber int) {
 			defer wg.Done()
-			worker := <-registerChan
-			//give worker back
+			var ok bool
+			var worker string
+			//give successful worker back
 			defer func() {
 				go func() {
 					registerChan <- worker
 				}()
 			}()
-			file := ""
-			if phase == mapPhase {
-				file = mapFiles[taskNumber]
-			}
-			if ok := call(worker, "Worker.DoTask", &DoTaskArgs{
-				JobName:       jobName,
-				File:          file,
-				Phase:         phase,
-				TaskNumber:    taskNumber,
-				NumOtherPhase: n_other,
-			}, nil); !ok {
-				panic(fmt.Sprintf("Schecule: RPC %s DoTask error\n", worker))
+			//if not ok, get next worker.
+			//eventually, only valid workers in chan
+			for !ok {
+				select {
+				case worker = <-registerChan:
+				case <-time.After(2 * time.Second):
+					panic("no valid worker!")
+				}
+				file := ""
+				if phase == mapPhase {
+					file = mapFiles[taskNumber]
+				}
+				ok = call(worker, "Worker.DoTask", &DoTaskArgs{
+					JobName:       jobName,
+					File:          file,
+					Phase:         phase,
+					TaskNumber:    taskNumber,
+					NumOtherPhase: n_other,
+				}, nil)
 			}
 		}(i)
 	}
