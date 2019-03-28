@@ -1,11 +1,11 @@
 # 6.824-MIT
 MIT 6.824-2018 Labs
 
-# [Course Video](https://www.bilibili.com/video/av38073607/?p=2)
+## [Course Video](https://www.bilibili.com/video/av38073607/?p=2)
 
-# [Course Home](https://pdos.csail.mit.edu/6.824/index.html)
+## [Course Home](https://pdos.csail.mit.edu/6.824/index.html)
 
-# Origin Repo
+## Origin Repo
 git://g.csail.mit.edu/6.824-golabs-2018
 
 if the origin repo can't be access, use following command can get it:
