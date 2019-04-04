@@ -182,12 +182,21 @@ type RequestVoteReply struct {
 //
 // example RequestVote RPC handler.
 //
+func (rf *Raft) updateTerm(term int) bool {
+	rf.mu.Lock()
+	if rf.currentTerm < term {
+		rf.mu.Unlock()
+		rf.newTerm <- term
+		return true
+	}
+	rf.mu.Unlock()
+	return false
+}
+
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	fmt.Println("server", rf.me, "get request vote rpc from", args.CandidateId)
-	if rf.currentTerm < args.Term {
-		rf.newTerm <- args.Term
-	}
+	rf.updateTerm(args.Term)
 	rf.mu.Lock()
 	reply.Term = rf.currentTerm
 	fmt.Println("server term", rf.currentTerm, "request term", args.Term)
@@ -251,9 +260,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	fmt.Println("server", rf.me, "get heartbeats rpc from", args.LeaderId)
 	// Your code here (2A, 2B).
 	fmt.Println("server term", rf.currentTerm, "request term", args.Term, "server role", rf.role)
-	if rf.currentTerm < args.Term {
-		rf.newTerm <- args.Term
-	}
+	rf.updateTerm(args.Term)
 
 	rf.mu.Lock()
 	reply.Term = rf.currentTerm
@@ -320,14 +327,11 @@ func (rf *Raft) sendRequestVote(getVote chan struct{}) {
 						lastIndex,
 						lastTerm}, &reply); ok {
 						fmt.Println("server", rf.me, "get request vote response from", server)
-						rf.mu.Lock()
-						if rf.currentTerm < reply.Term {
-							rf.mu.Unlock()
-							rf.newTerm <- reply.Term
+						if rf.updateTerm(reply.Term) {
 							fmt.Println("server", rf.me, "get request vote response and to follower from", server)
 							return
 						}
-
+						rf.mu.Lock()
 						if reply.VoteGranted && rf.role == RaftCandidate {
 							rf.mu.Unlock()
 							fmt.Println("server", rf.me, "get request vote response and get a vote from", server)
@@ -363,14 +367,9 @@ func (rf *Raft) sendHeartBeats() {
 						LeaderCommit: 0,
 					}, &reply); ok {
 						fmt.Println("server", rf.me, "get heart beats response from", server)
-						rf.mu.Lock()
-						if rf.currentTerm < reply.Term {
-							rf.mu.Unlock()
-							rf.newTerm <- reply.Term
+						if rf.updateTerm(reply.Term) {
 							fmt.Println("server", rf.me, "get  heart beats response and to follower from", server)
-							return
 						}
-						rf.mu.Unlock()
 					}
 				}
 			}(i)
