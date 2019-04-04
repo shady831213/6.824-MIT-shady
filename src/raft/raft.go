@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"flag"
 	"fmt"
 	"labrpc"
 	"math/rand"
@@ -39,6 +40,8 @@ import (
 // snapshots) on the applyCh; at that point you can add fields to
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
+var raftDebug bool
+
 type RaftRole int
 
 const (
@@ -75,11 +78,12 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	debug bool
 	//role state
 	role      RaftRole
 	heartBeat chan struct{}
 	voted     chan struct{}
-	newTerm   chan int
+	newTerm   chan struct{}
 	stop      chan struct{}
 	// persistent states
 	currentTerm int
@@ -192,36 +196,38 @@ type RequestVoteReply struct {
 func (rf *Raft) updateTerm(term int) bool {
 	rf.mu.Lock()
 	if rf.currentTerm < term {
+		rf.votedFor = -1
+		rf.currentTerm = term
 		rf.mu.Unlock()
-		rf.newTerm <- term
+		rf.newTerm <- struct{}{}
 		return true
 	}
 	rf.mu.Unlock()
 	return false
 }
 
-func (rf *Raft) grantVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) requestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastIndex, lastTerm := rf.lastLogEntryInfo()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
-	fmt.Println("server term", rf.currentTerm, "request term", args.Term)
+	RaftDebug("server term", rf.currentTerm, "request term", args.Term)
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		return
 	}
-	fmt.Println("server votedFor", rf.votedFor, "request id", args.CandidateId)
+	RaftDebug("server votedFor", rf.votedFor, "request id", args.CandidateId)
 	if rf.votedFor >= 0 && rf.votedFor != args.CandidateId {
 		reply.VoteGranted = false
 		return
 	}
 
-	fmt.Println("server LastLogTerm", lastTerm, "request LastLogTerm", args.LastLogTerm)
+	RaftDebug("server LastLogTerm", lastTerm, "request LastLogTerm", args.LastLogTerm)
 	if args.LastLogTerm < lastTerm {
 		reply.VoteGranted = false
 		return
 	}
-	fmt.Println("server LastLogIndex", lastIndex, "request LastLogIndex", args.LastLogIndex)
+	RaftDebug("server LastLogIndex", lastIndex, "request LastLogIndex", args.LastLogIndex)
 	if args.LastLogTerm == lastTerm && args.LastLogIndex < lastIndex {
 		rf.mu.Unlock()
 		reply.VoteGranted = false
@@ -230,18 +236,20 @@ func (rf *Raft) grantVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
-	fmt.Println("server", rf.me, "vote response", reply.VoteGranted)
+	RaftDebug("server", rf.me, "vote response", reply.VoteGranted)
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	fmt.Println("server", rf.me, "get request vote rpc from", args.CandidateId)
+	RaftDebug("server", rf.me, "get request vote rpc from", args.CandidateId)
 	rf.updateTerm(args.Term)
-	rf.grantVote(args, reply)
+	rf.requestVote(args, reply)
+
 	if reply.VoteGranted {
 		rf.voted <- struct{}{}
+		RaftDebug("server", rf.me, "vote to", args.CandidateId)
 	}
-	fmt.Println("server", rf.me, "vote to", args.CandidateId)
+
 }
 
 type AppendEntriesArgs struct {
@@ -265,13 +273,9 @@ type AppendEntriesReply struct {
 }
 
 // AppendEntries , currently only heartBeat
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	fmt.Println("server", rf.me, "get heartbeats rpc from", args.LeaderId)
-	// Your code here (2A, 2B).
-	fmt.Println("server term", rf.currentTerm, "request term", args.Term, "server role", rf.role)
-	rf.updateTerm(args.Term)
-
+func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	RaftDebug("server term", rf.currentTerm, "request term", args.Term, "server role", rf.role)
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		rf.mu.Unlock()
@@ -280,8 +284,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//fix me
 	reply.Success = true
-	//heartbeat
 	rf.mu.Unlock()
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	RaftDebug("server", rf.me, "get heartbeats rpc from", args.LeaderId)
+	// Your code here (2A, 2B).
+	rf.updateTerm(args.Term)
+	rf.appendEntries(args, reply)
 
 	if args.Entries == nil {
 		rf.heartBeat <- struct{}{}
@@ -326,19 +336,19 @@ func (rf *Raft) sendRequestVote(getVote chan struct{}) {
 
 				if role == RaftCandidate {
 					reply := RequestVoteReply{}
-					fmt.Println("server", rf.me, "send request vote to", server)
+					RaftDebug("server", rf.me, "send request vote to", server)
 					if ok := rf.peers[server].Call("Raft.RequestVote", &RequestVoteArgs{
 						term,
 						rf.me,
 						lastIndex,
 						lastTerm}, &reply); ok {
-						fmt.Println("server", rf.me, "get request vote response from", server)
+						RaftDebug("server", rf.me, "get request vote response from", server)
 						if rf.updateTerm(reply.Term) {
-							fmt.Println("server", rf.me, "get request vote response and to follower from", server)
+							RaftDebug("server", rf.me, "get request vote response and to follower from", server)
 							return
 						}
 						if reply.VoteGranted {
-							fmt.Println("server", rf.me, "get request vote response and get a vote from", server)
+							RaftDebug("server", rf.me, "get request vote response and get a vote from", server)
 							getVote <- struct{}{}
 						}
 					}
@@ -355,7 +365,7 @@ func (rf *Raft) sendHeartBeats() {
 				term, role := rf.getState()
 				if role == RaftLeader {
 					reply := AppendEntriesReply{}
-					fmt.Println("server", rf.me, "send heart beats to", server)
+					RaftDebug("server", rf.me, "send heart beats to", server)
 					if ok := rf.peers[server].Call("Raft.AppendEntries", &AppendEntriesArgs{
 						Term:     term,
 						LeaderId: rf.me,
@@ -365,9 +375,9 @@ func (rf *Raft) sendHeartBeats() {
 						Entries:      nil,
 						LeaderCommit: 0,
 					}, &reply); ok {
-						fmt.Println("server", rf.me, "get heart beats response from", server)
+						RaftDebug("server", rf.me, "get heart beats response from", server)
 						if rf.updateTerm(reply.Term) {
-							fmt.Println("server", rf.me, "get  heart beats response and to follower from", server)
+							RaftDebug("server", rf.me, "get  heart beats response and to follower from", server)
 						}
 					}
 				}
@@ -425,14 +435,6 @@ func (rf *Raft) setRole(role RaftRole) {
 	rf.role = role
 }
 
-func (rf *Raft) backToFollower(term int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.currentTerm = term
-	rf.votedFor = -1
-	rf.role = RaftFollower
-}
-
 func (rf *Raft) fsm() {
 	for {
 		switch rf.role {
@@ -446,7 +448,7 @@ func (rf *Raft) fsm() {
 			rf.leaderState()
 			break
 		case RaftStop:
-			fmt.Println("server", rf.me, "stopped!")
+			RaftDebug("server", rf.me, "stopped!")
 			return
 		default:
 			panic("invalid raft role!")
@@ -455,15 +457,14 @@ func (rf *Raft) fsm() {
 }
 
 func (rf *Raft) followerState() {
-	fmt.Println("server", rf.me, "enter followerState")
+	RaftDebug("server", rf.me, "enter followerState")
 	timer := time.NewTimer(rf.getElectionTimeout())
 	for {
 		select {
 		case <-rf.stop:
 			rf.setRole(RaftStop)
 			return
-		case newTerm := <-rf.newTerm:
-			rf.backToFollower(newTerm)
+		case <-rf.newTerm:
 			return
 		case <-timer.C:
 			rf.setRole(RaftCandidate)
@@ -488,25 +489,28 @@ func (rf *Raft) followerState() {
 }
 
 func (rf *Raft) candidateState() {
-	fmt.Println("server", rf.me, "enter candidateState")
+	RaftDebug("server", rf.me, "enter candidateState")
+	//vote for self
 	rf.mu.Lock()
 	rf.currentTerm++
+	rf.votedFor = rf.me
 	rf.mu.Unlock()
 	votes := 1
-	timer := time.NewTimer(rf.getElectionTimeout())
-	getVote := make(chan struct{}, len(rf.peers)-1)
 
 	//get votes
+	getVote := make(chan struct{}, len(rf.peers)-1)
 	rf.sendRequestVote(getVote)
 
+	//start timer
+	timer := time.NewTimer(rf.getElectionTimeout())
 	//change state
 	for {
 		select {
 		case <-rf.stop:
 			rf.setRole(RaftStop)
 			return
-		case newTerm := <-rf.newTerm:
-			rf.backToFollower(newTerm)
+		case <-rf.newTerm:
+			rf.setRole(RaftFollower)
 			return
 		case <-timer.C:
 			return
@@ -525,7 +529,7 @@ func (rf *Raft) candidateState() {
 }
 
 func (rf *Raft) leaderState() {
-	fmt.Println("server", rf.me, "enter leaderState")
+	RaftDebug("server", rf.me, "enter leaderState")
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = len(rf.logs) + 1
@@ -537,12 +541,12 @@ func (rf *Raft) leaderState() {
 		case <-rf.stop:
 			rf.setRole(RaftStop)
 			return
-		case newTerm := <-rf.newTerm:
-			rf.backToFollower(newTerm)
-			fmt.Println("server", rf.me, "exit leaderState")
+		case <-rf.newTerm:
+			rf.setRole(RaftFollower)
+			RaftDebug("server", rf.me, "exit leaderState")
 			return
 		case <-time.After(RaftHeartBeatPeriod):
-			fmt.Println("server", rf.me, "send heartBeats in leaderState")
+			RaftDebug("server", rf.me, "send heartBeats in leaderState")
 			rf.sendHeartBeats()
 			break
 		}
@@ -571,17 +575,27 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = RaftFollower
 	rf.heartBeat = make(chan struct{})
 	rf.voted = make(chan struct{})
-	rf.newTerm = make(chan int)
+	rf.newTerm = make(chan struct{})
 	rf.stop = make(chan struct{})
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = make([]RaftLogEntry, 0)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	go rf.fsm()
 	return rf
+}
+
+func RaftDebug(a ...interface{}) {
+	if raftDebug {
+		fmt.Println(a...)
+	}
+}
+
+func init() {
+	flag.BoolVar(&raftDebug, "raft_debug", false, "debug flag of raft")
+	flag.Parse()
 }
