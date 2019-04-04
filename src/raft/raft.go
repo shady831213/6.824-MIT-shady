@@ -98,24 +98,31 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	term, role := rf.getState()
+	return term, role == RaftLeader
+}
+
+func (rf *Raft) getState() (int, RaftRole) {
 	var term int
-	var isleader bool
+	var role RaftRole
 
 	// Your code here (2A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
-	isleader = rf.role == RaftLeader
-	return term, isleader
+	role = rf.role
+	return term, role
 }
 
-//need lock
 func (rf *Raft) lastLogEntryInfo() (int, int) {
 	if len(rf.logs) == 0 {
 		return 1, 0
 	}
-	lastIndex := len(rf.logs)
-	lastTerm := rf.logs[lastIndex-1].Term
+	var lastIndex, lastTerm int
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	lastIndex = len(rf.logs)
+	lastTerm = rf.logs[lastIndex-1].Term
 	return lastIndex, lastTerm
 }
 
@@ -193,29 +200,24 @@ func (rf *Raft) updateTerm(term int) bool {
 	return false
 }
 
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	fmt.Println("server", rf.me, "get request vote rpc from", args.CandidateId)
-	rf.updateTerm(args.Term)
+func (rf *Raft) grantVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	lastIndex, lastTerm := rf.lastLogEntryInfo()
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	fmt.Println("server term", rf.currentTerm, "request term", args.Term)
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
-		rf.mu.Unlock()
 		return
 	}
 	fmt.Println("server votedFor", rf.votedFor, "request id", args.CandidateId)
 	if rf.votedFor >= 0 && rf.votedFor != args.CandidateId {
-		rf.mu.Unlock()
 		reply.VoteGranted = false
 		return
 	}
 
-	lastIndex, lastTerm := rf.lastLogEntryInfo()
 	fmt.Println("server LastLogTerm", lastTerm, "request LastLogTerm", args.LastLogTerm)
 	if args.LastLogTerm < lastTerm {
-		rf.mu.Unlock()
 		reply.VoteGranted = false
 		return
 	}
@@ -229,9 +231,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
 	fmt.Println("server", rf.me, "vote response", reply.VoteGranted)
-	rf.mu.Unlock()
+}
 
-	rf.voted <- struct{}{}
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	// Your code here (2A, 2B).
+	fmt.Println("server", rf.me, "get request vote rpc from", args.CandidateId)
+	rf.updateTerm(args.Term)
+	rf.grantVote(args, reply)
+	if reply.VoteGranted {
+		rf.voted <- struct{}{}
+	}
 	fmt.Println("server", rf.me, "vote to", args.CandidateId)
 }
 
@@ -312,11 +321,8 @@ func (rf *Raft) sendRequestVote(getVote chan struct{}) {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
-				rf.mu.Lock()
 				lastIndex, lastTerm := rf.lastLogEntryInfo()
-				role := rf.role
-				term := rf.currentTerm
-				rf.mu.Unlock()
+				term, role := rf.getState()
 
 				if role == RaftCandidate {
 					reply := RequestVoteReply{}
@@ -331,14 +337,10 @@ func (rf *Raft) sendRequestVote(getVote chan struct{}) {
 							fmt.Println("server", rf.me, "get request vote response and to follower from", server)
 							return
 						}
-						rf.mu.Lock()
-						if reply.VoteGranted && rf.role == RaftCandidate {
-							rf.mu.Unlock()
+						if reply.VoteGranted {
 							fmt.Println("server", rf.me, "get request vote response and get a vote from", server)
 							getVote <- struct{}{}
-							return
 						}
-						rf.mu.Unlock()
 					}
 				}
 			}(i)
@@ -350,10 +352,7 @@ func (rf *Raft) sendHeartBeats() {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
-				rf.mu.Lock()
-				role := rf.role
-				term := rf.currentTerm
-				rf.mu.Unlock()
+				term, role := rf.getState()
 				if role == RaftLeader {
 					reply := AppendEntriesReply{}
 					fmt.Println("server", rf.me, "send heart beats to", server)
