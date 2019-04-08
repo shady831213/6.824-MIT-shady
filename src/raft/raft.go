@@ -468,32 +468,19 @@ func (rf *Raft) fsm() {
 func (rf *Raft) followerState() {
 	RaftDebug("server", rf.me, "enter followerState")
 	timer := time.NewTimer(rf.getElectionTimeout())
-	for {
-		select {
-		case <-rf.stop:
-			rf.setRole(RaftStop)
-			return
-		case <-rf.newTerm:
-			return
-		case <-timer.C:
-			rf.setRole(RaftCandidate)
-			return
-		case <-rf.heartBeat:
-			//if timer has been sendTime already, never get here
-			//if timer stop ok, reset
-			//if get here, then timer sendTime, stop fail, time.C will be drain immediately.
-			if !timer.Stop() {
-				<-timer.C
-			}
-			timer.Reset(rf.getElectionTimeout())
-			break
-		case <-rf.voted:
-			if !timer.Stop() {
-				<-timer.C
-			}
-			timer.Reset(rf.getElectionTimeout())
-			break
-		}
+	select {
+	case <-rf.stop:
+		rf.setRole(RaftStop)
+		return
+	case <-timer.C:
+		rf.setRole(RaftCandidate)
+		return
+	case <-rf.newTerm:
+		return
+	case <-rf.heartBeat:
+		return
+	case <-rf.voted:
+		return
 	}
 }
 
