@@ -470,10 +470,10 @@ func (rf *Raft) followerState() {
 	case <-rf.stop:
 		rf.setRole(RaftStop)
 		return
+	case <-rf.toFollower:
+		return
 	case <-timer.C:
 		rf.setRole(RaftCandidate)
-		return
-	case <-rf.toFollower:
 		return
 	}
 }
@@ -499,6 +499,9 @@ func (rf *Raft) candidateState() {
 		case <-rf.stop:
 			rf.setRole(RaftStop)
 			return
+		case <-rf.toFollower:
+			rf.setRole(RaftFollower)
+			return
 		case <-timer.C:
 			return
 		case <-getVote:
@@ -508,9 +511,6 @@ func (rf *Raft) candidateState() {
 				return
 			}
 			break
-		case <-rf.toFollower:
-			rf.setRole(RaftFollower)
-			return
 		}
 	}
 }
