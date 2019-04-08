@@ -80,11 +80,10 @@ type Raft struct {
 
 	debug bool
 	//role state
-	role      RaftRole
-	heartBeat chan struct{}
-	voted     chan struct{}
-	newTerm   chan struct{}
-	stop      chan struct{}
+	role       RaftRole
+	toFollower chan struct{}
+	newTerm    chan struct{}
+	stop       chan struct{}
 	// persistent states
 	currentTerm int
 	votedFor    int
@@ -230,7 +229,7 @@ func (rf *Raft) requestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.votedFor = args.CandidateId
 	RaftDebug("server", rf.me, "vote response", reply.VoteGranted)
 	go func() {
-		rf.voted <- struct{}{}
+		rf.toFollower <- struct{}{}
 		RaftDebug("server", rf.me, "vote to", args.CandidateId)
 	}()
 }
@@ -269,7 +268,7 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-// AppendEntries , currently only heartBeat
+// AppendEntries , currently only toFollower
 func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	RaftDebug("server term", rf.currentTerm, "request term", args.Term, "server role", rf.role)
 	reply.Term = rf.currentTerm
@@ -281,7 +280,7 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	if args.Entries == nil {
 		go func() {
-			rf.heartBeat <- struct{}{}
+			rf.toFollower <- struct{}{}
 		}()
 	}
 }
@@ -477,9 +476,7 @@ func (rf *Raft) followerState() {
 		return
 	case <-rf.newTerm:
 		return
-	case <-rf.heartBeat:
-		return
-	case <-rf.voted:
+	case <-rf.toFollower:
 		return
 	}
 }
@@ -517,7 +514,7 @@ func (rf *Raft) candidateState() {
 				return
 			}
 			break
-		case <-rf.heartBeat:
+		case <-rf.toFollower:
 			rf.setRole(RaftFollower)
 			return
 		}
@@ -569,8 +566,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = RaftFollower
-	rf.heartBeat = make(chan struct{})
-	rf.voted = make(chan struct{})
+	rf.toFollower = make(chan struct{})
 	rf.newTerm = make(chan struct{})
 	rf.stop = make(chan struct{})
 	rf.currentTerm = 0
