@@ -477,25 +477,6 @@ func (rf *Raft) followerState() {
 	}
 }
 
-func (rf *Raft) toLeader() chan struct{} {
-	toLeader := make(chan struct{})
-	votes := 1
-	getVote := make(chan struct{}, len(rf.peers)-1)
-	rf.sendRequestVote(getVote)
-	go func() {
-		defer close(toLeader)
-		for {
-			<-getVote
-			votes++
-			if votes > len(rf.peers)/2 {
-				toLeader <- struct{}{}
-				return
-			}
-		}
-	}()
-	return toLeader
-}
-
 func (rf *Raft) candidateState() {
 	RaftDebug("server", rf.me, "enter candidateState")
 	//vote for self
@@ -503,19 +484,29 @@ func (rf *Raft) candidateState() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.mu.Unlock()
+
+	votes := 1
+	getVote := make(chan struct{}, len(rf.peers)-1)
+	rf.sendRequestVote(getVote)
 	//change state
-	select {
-	case <-rf.toStop:
-		rf.setRole(RaftStop)
-		return
-	case <-rf.toFollower:
-		rf.setRole(RaftFollower)
-		return
-	case <-time.After(rf.getElectionTimeout()):
-		return
-	case <-rf.toLeader():
-		rf.setRole(RaftLeader)
-		return
+	for {
+		select {
+		case <-rf.toStop:
+			rf.setRole(RaftStop)
+			return
+		case <-rf.toFollower:
+			rf.setRole(RaftFollower)
+			return
+		case <-time.After(rf.getElectionTimeout()):
+			return
+		case <-getVote:
+			votes++
+			if votes > len(rf.peers)/2 {
+				rf.setRole(RaftLeader)
+				return
+			}
+			break
+		}
 	}
 }
 
