@@ -20,7 +20,7 @@ import "sync"
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
-	servers := 3
+	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
@@ -48,7 +48,7 @@ func TestInitialElection2A(t *testing.T) {
 }
 
 func TestReElection2A(t *testing.T) {
-	servers := 3
+	servers := 5
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
@@ -70,20 +70,25 @@ func TestReElection2A(t *testing.T) {
 
 	// if there's no quorum, no leader should
 	// be elected.
-	cfg.disconnect(leader2)
-	cfg.disconnect((leader2 + 1) % servers)
+	for i := 0; i < (servers/2)+1; i++ {
+		cfg.disconnect((leader2 + i) % servers)
+	}
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 	RaftDebug("check no leader done!")
 
 	// if a quorum arises, it should elect a leader.
-	cfg.connect((leader2 + 1) % servers)
-	cfg.checkOneLeader()
-	RaftDebug("one serve alive check one leader done!")
+	for i := servers / 2; i > 0; i-- {
+		cfg.connect((leader2 + i) % servers)
+		cfg.checkOneLeader()
+		RaftDebug("one serve alive check one leader done!")
+	}
+
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
 	RaftDebug("all serve alive check one leader done!")
+
 	cfg.end()
 }
 
