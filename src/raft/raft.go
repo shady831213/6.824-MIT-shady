@@ -82,7 +82,6 @@ type Raft struct {
 	//role state
 	role       RaftRole
 	toFollower chan struct{}
-	newTerm    chan struct{}
 	stop       chan struct{}
 	// persistent states
 	currentTerm int
@@ -192,7 +191,7 @@ func (rf *Raft) updateTerm(term int) bool {
 		rf.votedFor = -1
 		rf.currentTerm = term
 		//update role when lock is released
-		go func() { rf.newTerm <- struct{}{} }()
+		go func() { rf.toFollower <- struct{}{} }()
 		return true
 	}
 	return false
@@ -474,8 +473,6 @@ func (rf *Raft) followerState() {
 	case <-timer.C:
 		rf.setRole(RaftCandidate)
 		return
-	case <-rf.newTerm:
-		return
 	case <-rf.toFollower:
 		return
 	}
@@ -501,9 +498,6 @@ func (rf *Raft) candidateState() {
 		select {
 		case <-rf.stop:
 			rf.setRole(RaftStop)
-			return
-		case <-rf.newTerm:
-			rf.setRole(RaftFollower)
 			return
 		case <-timer.C:
 			return
@@ -534,7 +528,7 @@ func (rf *Raft) leaderState() {
 		case <-rf.stop:
 			rf.setRole(RaftStop)
 			return
-		case <-rf.newTerm:
+		case <-rf.toFollower:
 			rf.setRole(RaftFollower)
 			RaftDebug("server", rf.me, "exit leaderState")
 			return
@@ -567,7 +561,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = RaftFollower
 	rf.toFollower = make(chan struct{})
-	rf.newTerm = make(chan struct{})
 	rf.stop = make(chan struct{})
 	rf.currentTerm = 0
 	rf.votedFor = -1
