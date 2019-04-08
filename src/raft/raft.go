@@ -82,7 +82,7 @@ type Raft struct {
 	//role state
 	role       RaftRole
 	toFollower chan struct{}
-	stop       chan struct{}
+	toStop     chan struct{}
 	// persistent states
 	currentTerm int
 	votedFor    int
@@ -425,7 +425,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	rf.stop <- struct{}{}
+	rf.toStop <- struct{}{}
 }
 
 //
@@ -465,17 +465,35 @@ func (rf *Raft) fsm() {
 
 func (rf *Raft) followerState() {
 	RaftDebug("server", rf.me, "enter followerState")
-	timer := time.NewTimer(rf.getElectionTimeout())
 	select {
-	case <-rf.stop:
+	case <-rf.toStop:
 		rf.setRole(RaftStop)
 		return
 	case <-rf.toFollower:
 		return
-	case <-timer.C:
+	case <-time.After(rf.getElectionTimeout()):
 		rf.setRole(RaftCandidate)
 		return
 	}
+}
+
+func (rf *Raft) toLeader() chan struct{} {
+	toLeader := make(chan struct{})
+	votes := 1
+	getVote := make(chan struct{}, len(rf.peers)-1)
+	rf.sendRequestVote(getVote)
+	go func() {
+		defer close(toLeader)
+		for {
+			<-getVote
+			votes++
+			if votes > len(rf.peers)/2 {
+				toLeader <- struct{}{}
+				return
+			}
+		}
+	}()
+	return toLeader
 }
 
 func (rf *Raft) candidateState() {
@@ -485,33 +503,19 @@ func (rf *Raft) candidateState() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.mu.Unlock()
-	votes := 1
-
-	//get votes
-	getVote := make(chan struct{}, len(rf.peers)-1)
-	rf.sendRequestVote(getVote)
-
-	//start timer
-	timer := time.NewTimer(rf.getElectionTimeout())
 	//change state
-	for {
-		select {
-		case <-rf.stop:
-			rf.setRole(RaftStop)
-			return
-		case <-rf.toFollower:
-			rf.setRole(RaftFollower)
-			return
-		case <-timer.C:
-			return
-		case <-getVote:
-			votes++
-			if votes > len(rf.peers)/2 {
-				rf.setRole(RaftLeader)
-				return
-			}
-			break
-		}
+	select {
+	case <-rf.toStop:
+		rf.setRole(RaftStop)
+		return
+	case <-rf.toFollower:
+		rf.setRole(RaftFollower)
+		return
+	case <-time.After(rf.getElectionTimeout()):
+		return
+	case <-rf.toLeader():
+		rf.setRole(RaftLeader)
+		return
 	}
 }
 
@@ -525,7 +529,7 @@ func (rf *Raft) leaderState() {
 	rf.sendHeartBeats()
 	for {
 		select {
-		case <-rf.stop:
+		case <-rf.toStop:
 			rf.setRole(RaftStop)
 			return
 		case <-rf.toFollower:
@@ -561,7 +565,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = RaftFollower
 	rf.toFollower = make(chan struct{})
-	rf.stop = make(chan struct{})
+	rf.toStop = make(chan struct{})
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = make([]RaftLogEntry, 0)
