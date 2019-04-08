@@ -219,7 +219,6 @@ func (rf *Raft) requestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	RaftDebug("server LastLogIndex", lastIndex, "request LastLogIndex", args.LastLogIndex)
 	if args.LastLogTerm == lastTerm && args.LastLogIndex < lastIndex {
-		rf.mu.Unlock()
 		reply.VoteGranted = false
 		return
 	}
