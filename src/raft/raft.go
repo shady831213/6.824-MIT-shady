@@ -111,12 +111,13 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, role == RaftLeader
 }
 
-func (rf *Raft) apply(begin, end int) {
+func (rf *Raft) apply() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	for i := begin; i < end+1; i++ {
-		RaftDebug("sever", rf.me, "apply", ApplyMsg{true, rf.logs[i].Command, i})
-		rf.applyChan <- ApplyMsg{true, rf.logs[i].Command, i}
+	for rf.commitIndex > rf.lastApplied {
+		rf.lastApplied++
+		RaftDebug("sever", rf.me, "apply", ApplyMsg{true, rf.logs[rf.lastApplied].Command, rf.lastApplied})
+		rf.applyChan <- ApplyMsg{true, rf.logs[rf.lastApplied].Command, rf.lastApplied}
 	}
 }
 
@@ -327,12 +328,11 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	//update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
-		newIndex := len(rf.logs) - 1
-		if args.LeaderCommit < newIndex {
-			newIndex = args.LeaderCommit
+		rf.commitIndex = len(rf.logs) - 1
+		if args.LeaderCommit < rf.commitIndex {
+			rf.commitIndex = args.LeaderCommit
 		}
-		go rf.apply(rf.commitIndex+1, newIndex)
-		rf.commitIndex = newIndex
+		go rf.apply()
 	}
 	reply.Success = true
 }
@@ -618,8 +618,8 @@ func (rf *Raft) updateCommitIndex(index int) {
 			count++
 		}
 		if count > len(rf.peers)/2 {
-			go rf.apply(rf.commitIndex+1, index)
 			rf.commitIndex = index
+			go rf.apply()
 			return
 		}
 	}
