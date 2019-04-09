@@ -19,8 +19,8 @@ package raft
 
 import (
 	"flag"
-	"fmt"
 	"labrpc"
+	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -109,6 +109,15 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.Unlock()
 	term, role = rf.getState()
 	return term, role == RaftLeader
+}
+
+func (rf *Raft) apply(begin, end int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for i := begin; i < end+1; i++ {
+		RaftDebug("sever", rf.me, "apply", ApplyMsg{true, rf.logs[i].Command, i})
+		rf.applyChan <- ApplyMsg{true, rf.logs[i].Command, i}
+	}
 }
 
 //must be inside critical region
@@ -297,7 +306,9 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	//check conflict
+	RaftDebug("server", rf.me, "get appendEntries rpc from", args.LeaderId, "PrevLogIndex", args.PrevLogIndex, "logs", rf.logs, "entries", args.Entries)
 	newEntries := args.Entries
+	rf.logs = rf.logs[:args.PrevLogIndex+1]
 	if args.PrevLogIndex < len(rf.logs)-1 {
 		for i, e := range rf.logs[args.PrevLogIndex+1:] {
 			if i-args.PrevLogIndex > len(newEntries)-1 {
@@ -312,17 +323,16 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//append new entries
 	RaftDebug("server", rf.me, "get appendEntries rpc from", args.LeaderId, "newEntries", newEntries, "logs", rf.logs, "entries", args.Entries)
-	for i, e := range newEntries {
-		rf.applyChan <- ApplyMsg{true, e.Command, i + len(rf.logs)}
-	}
 	rf.logs = append(rf.logs, newEntries...)
 
 	//update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = len(rf.logs) - 1
-		if args.LeaderCommit < rf.commitIndex {
-			rf.commitIndex = args.LeaderCommit
+		newIndex := len(rf.logs) - 1
+		if args.LeaderCommit < newIndex {
+			newIndex = args.LeaderCommit
 		}
+		go rf.apply(rf.commitIndex+1, newIndex)
+		rf.commitIndex = newIndex
 	}
 	reply.Success = true
 }
@@ -386,10 +396,12 @@ func (rf *Raft) sendRequestVote(getVote chan struct{}) {
 						rf.mu.Lock()
 						_, role := rf.getState()
 						defer rf.mu.Unlock()
+
 						if rf.updateTerm(reply.Term) {
 							RaftDebug("server", rf.me, "get request vote response and to follower from", server)
 							return
 						}
+
 						if reply.VoteGranted && role == RaftCandidate {
 							RaftDebug("server", rf.me, "get request vote response and get a vote from", server)
 							go func() {
@@ -430,6 +442,7 @@ func (rf *Raft) sendAppendEntries() {
 						RaftDebug("server", rf.me, "get appendEntries response from", server)
 						rf.mu.Lock()
 						defer rf.mu.Unlock()
+
 						if rf.updateTerm(reply.Term) {
 							RaftDebug("server", rf.me, "get  appendEntries response from", server, "and to follower")
 							return
@@ -444,9 +457,9 @@ func (rf *Raft) sendAppendEntries() {
 							rf.nextIndex[server] = len(rf.logs)
 							rf.matchedIndex[server] = len(rf.logs) - 1
 							if len(rf.logs)-1 > rf.commitIndex {
-								go func() {
-									rf.committed <- len(rf.logs) - 1
-								}()
+								go func(index int) {
+									rf.committed <- index
+								}(len(rf.logs) - 1)
 							}
 							RaftDebug("server", rf.me, "appendEntries success to", server)
 							return
@@ -483,9 +496,6 @@ func (rf *Raft) start(command interface{}) int {
 	rf.mu.Lock()
 	index = len(rf.logs)
 	rf.logs = append(rf.logs, RaftLogEntry{command, rf.currentTerm})
-	go func() {
-		rf.applyChan <- ApplyMsg{true, command, index}
-	}()
 	rf.mu.Unlock()
 	rf.sendAppendEntries()
 	return index
@@ -608,6 +618,7 @@ func (rf *Raft) updateCommitIndex(index int) {
 			count++
 		}
 		if count > len(rf.peers)/2 {
+			go rf.apply(rf.commitIndex+1, index)
 			rf.commitIndex = index
 			return
 		}
@@ -684,7 +695,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func RaftDebug(a ...interface{}) {
 	if raftDebug {
-		fmt.Println(a...)
+		log.Println(a...)
 	}
 }
 
