@@ -113,13 +113,17 @@ func (rf *Raft) getState() (int, RaftRole) {
 	return rf.currentTerm, rf.role
 }
 
+//must be inside critical region
 func (rf *Raft) lastLogEntryInfo() (int, int) {
-	if len(rf.logs) == 0 {
-		return 1, 0
-	}
-	lastIndex := len(rf.logs)
-	lastTerm := rf.logs[lastIndex-1].Term
+	lastIndex := len(rf.logs) - 1
+	lastTerm := rf.logs[lastIndex].Term
 	return lastIndex, lastTerm
+}
+
+//must be inside critical region
+func (rf *Raft) lastFollowerEntryInfo(follower int) (int, int, int) {
+	index := rf.nextIndex[follower] - 1
+	return index, rf.logs[index].Term, rf.commitIndex
 }
 
 //
@@ -266,21 +270,55 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-// AppendEntries , currently only toFollower
+//must be inside critical region
 func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	RaftDebug("server term", rf.currentTerm, "request term", args.Term, "server role", rf.role)
-	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		reply.Success = false
-		return
-	}
-	//fix me
-	reply.Success = true
+	//heartbeat
 	if args.Entries == nil {
 		go func() {
 			rf.toFollower <- struct{}{}
 		}()
 	}
+
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		return
+	}
+	//not exist
+	if args.PrevLogIndex > len(rf.logs)-1 {
+		reply.Success = false
+		return
+	}
+	//term not match
+	if entry := rf.logs[args.PrevLogIndex]; entry.Term != args.PrevLogTerm {
+		reply.Success = false
+		return
+	}
+	//check conflict
+	newEntries := args.Entries
+	if args.PrevLogIndex < len(rf.logs)-1 {
+		for i, e := range rf.logs[args.PrevLogIndex+1:] {
+			if i-args.PrevLogIndex > len(newEntries)-1 {
+				break
+			}
+			if e.Term != newEntries[i-args.PrevLogIndex].Term {
+				rf.logs = rf.logs[:i]
+				newEntries = newEntries[i-args.PrevLogIndex:]
+				break
+			}
+		}
+	}
+	//append new entries
+	rf.logs = append(rf.logs, newEntries...)
+	//update commitIndex
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = len(rf.logs) - 1
+		if args.LeaderCommit < rf.commitIndex {
+			rf.commitIndex = args.LeaderCommit
+		}
+	}
+	reply.Success = true
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -365,18 +403,18 @@ func (rf *Raft) sendHeartBeats() {
 			go func(server int) {
 				rf.mu.Lock()
 				term, role := rf.getState()
+				lastIndex, lastTerm, commitIndex := rf.lastFollowerEntryInfo(server)
 				rf.mu.Unlock()
 				if role == RaftLeader {
 					reply := AppendEntriesReply{}
 					RaftDebug("server", rf.me, "send heart beats to", server)
 					if ok := rf.peers[server].Call("Raft.AppendEntries", &AppendEntriesArgs{
-						Term:     term,
-						LeaderId: rf.me,
-						//fix me
-						PrevLogIndex: 0,
-						PrevLogTerm:  0,
+						Term:         term,
+						LeaderId:     rf.me,
+						PrevLogIndex: lastIndex,
+						PrevLogTerm:  lastTerm,
 						Entries:      nil,
-						LeaderCommit: 0,
+						LeaderCommit: commitIndex,
 					}, &reply); ok {
 						//deal response
 						RaftDebug("server", rf.me, "get heart beats response from", server)
@@ -513,7 +551,7 @@ func (rf *Raft) leaderState() {
 	RaftDebug("server", rf.me, "enter leaderState")
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
-		rf.nextIndex[i] = len(rf.logs) + 1
+		rf.nextIndex[i] = len(rf.logs)
 	}
 	rf.matchedIndex = make([]int, len(rf.peers))
 	rf.sendHeartBeats()
@@ -558,7 +596,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.toStop = make(chan struct{})
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.logs = make([]RaftLogEntry, 0)
+	rf.logs = []RaftLogEntry{{0, 0}}
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	// initialize from state persisted before a crash
