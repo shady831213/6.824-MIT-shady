@@ -311,12 +311,12 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	//append new entries
-	rf.logs = append(rf.logs, newEntries...)
+	RaftDebug("server", rf.me, "get appendEntries rpc from", args.LeaderId, "newEntries", newEntries, "logs", rf.logs, "entries", args.Entries)
 	for i, e := range newEntries {
-		go func(index int) {
-			rf.applyChan <- ApplyMsg{true, e.Command, index}
-		}(i + len(rf.logs))
+		rf.applyChan <- ApplyMsg{true, e.Command, i + len(rf.logs)}
 	}
+	rf.logs = append(rf.logs, newEntries...)
+
 	//update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = len(rf.logs) - 1
@@ -328,7 +328,7 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	RaftDebug("server", rf.me, "get heartbeats rpc from", args.LeaderId)
+	RaftDebug("server", rf.me, "get appendEntries rpc from", args.LeaderId)
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -412,7 +412,7 @@ func (rf *Raft) sendAppendEntries() {
 				term, role := rf.getState()
 				lastIndex, lastTerm, commitIndex := rf.lastFollowerEntryInfo(server)
 				if len(rf.logs)-1 > lastIndex {
-					entries = rf.logs[lastIndex:]
+					entries = rf.logs[lastIndex+1:]
 				}
 				rf.mu.Unlock()
 				if role == RaftLeader {
