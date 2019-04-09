@@ -76,6 +76,8 @@ type Raft struct {
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
+	applyChan chan ApplyMsg
+
 	// state a Raft server must maintain.
 
 	debug bool
@@ -311,6 +313,11 @@ func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//append new entries
 	rf.logs = append(rf.logs, newEntries...)
+	for i, e := range newEntries {
+		go func(index int) {
+			rf.applyChan <- ApplyMsg{true, e.Command, index}
+		}(i + len(rf.logs))
+	}
 	//update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = len(rf.logs) - 1
@@ -599,6 +606,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = []RaftLogEntry{{0, 0}}
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+
+	rf.applyChan = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
