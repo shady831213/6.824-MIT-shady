@@ -84,6 +84,7 @@ type Raft struct {
 	//role state
 	role       RaftRole
 	toFollower chan struct{}
+	heartBeat  chan struct{}
 	toStop     chan struct{}
 	committed  chan int
 	// persistent states
@@ -209,6 +210,7 @@ func (rf *Raft) updateTerm(term int) bool {
 		rf.votedFor = -1
 		rf.currentTerm = term
 		//update role when lock is released
+		rf.role = RaftFollower
 		go func() { rf.toFollower <- struct{}{} }()
 		return true
 	}
@@ -245,7 +247,7 @@ func (rf *Raft) requestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.votedFor = args.CandidateId
 	RaftDebug("server", rf.me, "vote response", reply.VoteGranted)
 	go func() {
-		rf.toFollower <- struct{}{}
+		rf.heartBeat <- struct{}{}
 		RaftDebug("server", rf.me, "vote to", args.CandidateId)
 	}()
 }
@@ -288,8 +290,9 @@ type AppendEntriesReply struct {
 func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	RaftDebug("server term", rf.currentTerm, "request term", args.Term, "server role", rf.role)
 	//heartbeat
+	rf.role = RaftFollower
 	go func() {
-		rf.toFollower <- struct{}{}
+		rf.heartBeat <- struct{}{}
 	}()
 
 	reply.Term = rf.currentTerm
@@ -445,7 +448,7 @@ func (rf *Raft) sendOneAppendEntries(server int) bool {
 				return true
 			}
 
-			if term, role = rf.getState(); role != RaftLeader {
+			if rf.role != RaftLeader {
 				RaftDebug("server", rf.me, "get  appendEntries response and lost leader role")
 				return true
 			}
@@ -550,7 +553,10 @@ func (rf *Raft) setRole(role RaftRole) {
 
 func (rf *Raft) fsm() {
 	for {
-		switch rf.role {
+		rf.mu.Lock()
+		role := rf.role
+		rf.mu.Unlock()
+		switch role {
 		case RaftFollower:
 			rf.followerState()
 			break
@@ -574,6 +580,8 @@ func (rf *Raft) followerState() {
 	select {
 	case <-rf.toStop:
 		rf.setRole(RaftStop)
+		return
+	case <-rf.heartBeat:
 		return
 	case <-rf.toFollower:
 		return
@@ -600,8 +608,9 @@ func (rf *Raft) candidateState() {
 		case <-rf.toStop:
 			rf.setRole(RaftStop)
 			return
+		case <-rf.heartBeat:
+			return
 		case <-rf.toFollower:
-			rf.setRole(RaftFollower)
 			return
 		case <-time.After(rf.getElectionTimeout()):
 			return
@@ -648,7 +657,6 @@ func (rf *Raft) leaderState() {
 			rf.setRole(RaftStop)
 			return
 		case <-rf.toFollower:
-			rf.setRole(RaftFollower)
 			RaftDebug("server", rf.me, "exit leaderState")
 			return
 		case <-time.After(RaftHeartBeatPeriod):
@@ -685,6 +693,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = RaftFollower
 	rf.toFollower = make(chan struct{})
 	rf.toStop = make(chan struct{})
+	rf.heartBeat = make(chan struct{})
 	rf.committed = make(chan int)
 	rf.currentTerm = 0
 	rf.votedFor = -1
