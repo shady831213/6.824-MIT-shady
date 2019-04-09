@@ -116,6 +116,7 @@ func (rf *Raft) apply() {
 	defer rf.mu.Unlock()
 	for rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
+		RaftDebug("sever", rf.me, "applyIndex", rf.lastApplied, "commitIndex", rf.commitIndex, "log", rf.logs)
 		RaftDebug("sever", rf.me, "apply", ApplyMsg{true, rf.logs[rf.lastApplied].Command, rf.lastApplied})
 		rf.applyChan <- ApplyMsg{true, rf.logs[rf.lastApplied].Command, rf.lastApplied}
 	}
@@ -415,72 +416,68 @@ func (rf *Raft) sendRequestVote(getVote chan struct{}) {
 	}
 }
 
+func (rf *Raft) sendOneAppendEntries(server int) bool {
+	var entries []RaftLogEntry
+	rf.mu.Lock()
+	term, role := rf.getState()
+	lastIndex, lastTerm, commitIndex := rf.lastFollowerEntryInfo(server)
+	if len(rf.logs)-1 > lastIndex {
+		entries = append(entries, rf.logs[lastIndex+1:]...)
+	}
+	rf.mu.Unlock()
+	if role == RaftLeader {
+		reply := AppendEntriesReply{}
+		RaftDebug("server", rf.me, "send appendEntries to", server)
+		if ok := rf.peers[server].Call("Raft.AppendEntries", &AppendEntriesArgs{
+			Term:         term,
+			LeaderId:     rf.me,
+			PrevLogIndex: lastIndex,
+			PrevLogTerm:  lastTerm,
+			Entries:      entries,
+			LeaderCommit: commitIndex,
+		}, &reply); ok {
+			//deal response
+			RaftDebug("server", rf.me, "get appendEntries response from", server)
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if rf.updateTerm(reply.Term) {
+				RaftDebug("server", rf.me, "get  appendEntries response from", server, "and to follower")
+				return true
+			}
+
+			if term, role = rf.getState(); role != RaftLeader {
+				RaftDebug("server", rf.me, "get  appendEntries response and lost leader role")
+				return true
+			}
+
+			if reply.Success {
+				rf.nextIndex[server] = len(rf.logs)
+				rf.matchedIndex[server] = len(rf.logs) - 1
+				if len(rf.logs)-1 > rf.commitIndex {
+					go func(index int) {
+						rf.committed <- index
+					}(len(rf.logs) - 1)
+				}
+				RaftDebug("server", rf.me, "appendEntries success to", server)
+				return true
+
+			}
+
+			if rf.nextIndex[server] > 1 {
+				rf.nextIndex[server] --
+				RaftDebug("server", rf.me, "appendEntries fail to", server, "nextIndex", rf.nextIndex[server], "retry...")
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (rf *Raft) sendAppendEntries() {
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(server int) {
-				var entries []RaftLogEntry
-				rf.mu.Lock()
-				term, role := rf.getState()
-				lastIndex, lastTerm, commitIndex := rf.lastFollowerEntryInfo(server)
-				if len(rf.logs)-1 > lastIndex {
-					entries = append(entries, rf.logs[lastIndex+1:]...)
-				}
-				rf.mu.Unlock()
-				for role == RaftLeader {
-					reply := AppendEntriesReply{}
-					RaftDebug("server", rf.me, "send appendEntries to", server)
-					if ok := rf.peers[server].Call("Raft.AppendEntries", &AppendEntriesArgs{
-						Term:         term,
-						LeaderId:     rf.me,
-						PrevLogIndex: lastIndex,
-						PrevLogTerm:  lastTerm,
-						Entries:      entries,
-						LeaderCommit: commitIndex,
-					}, &reply); ok {
-						//deal response
-						RaftDebug("server", rf.me, "get appendEntries response from", server)
-						rf.mu.Lock()
-
-						if rf.updateTerm(reply.Term) {
-							RaftDebug("server", rf.me, "get  appendEntries response from", server, "and to follower")
-							rf.mu.Unlock()
-							return
-						}
-
-						if term, role = rf.getState(); role != RaftLeader {
-							RaftDebug("server", rf.me, "get  appendEntries response and lost leader role")
-							rf.mu.Unlock()
-							return
-						}
-
-						if reply.Success {
-							rf.nextIndex[server] = len(rf.logs)
-							rf.matchedIndex[server] = len(rf.logs) - 1
-							if len(rf.logs)-1 > rf.commitIndex {
-								go func(index int) {
-									rf.committed <- index
-								}(len(rf.logs) - 1)
-							}
-							RaftDebug("server", rf.me, "appendEntries success to", server)
-							rf.mu.Unlock()
-							return
-
-						}
-
-						if rf.nextIndex[server] <= 1 {
-							RaftDebug("server", rf.me, "appendEntries fail to", server, "nextIndex", rf.nextIndex[server], "exit")
-							rf.mu.Unlock()
-							return
-						}
-
-						rf.nextIndex[server] --
-						RaftDebug("server", rf.me, "appendEntries fail to", server, "nextIndex", rf.nextIndex[server], "retry...")
-						rf.mu.Unlock()
-						continue
-					}
-
-					return
+				for ! rf.sendOneAppendEntries(server) {
 				}
 			}(i)
 		}
