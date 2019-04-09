@@ -424,10 +424,10 @@ func (rf *Raft) sendAppendEntries() {
 				term, role := rf.getState()
 				lastIndex, lastTerm, commitIndex := rf.lastFollowerEntryInfo(server)
 				if len(rf.logs)-1 > lastIndex {
-					entries = rf.logs[lastIndex+1:]
+					entries = append(entries, rf.logs[lastIndex+1:]...)
 				}
 				rf.mu.Unlock()
-				if role == RaftLeader {
+				for role == RaftLeader {
 					reply := AppendEntriesReply{}
 					RaftDebug("server", rf.me, "send appendEntries to", server)
 					if ok := rf.peers[server].Call("Raft.AppendEntries", &AppendEntriesArgs{
@@ -441,15 +441,16 @@ func (rf *Raft) sendAppendEntries() {
 						//deal response
 						RaftDebug("server", rf.me, "get appendEntries response from", server)
 						rf.mu.Lock()
-						defer rf.mu.Unlock()
 
 						if rf.updateTerm(reply.Term) {
 							RaftDebug("server", rf.me, "get  appendEntries response from", server, "and to follower")
+							rf.mu.Unlock()
 							return
 						}
 
 						if term, role = rf.getState(); role != RaftLeader {
 							RaftDebug("server", rf.me, "get  appendEntries response and lost leader role")
+							rf.mu.Unlock()
 							return
 						}
 
@@ -462,15 +463,24 @@ func (rf *Raft) sendAppendEntries() {
 								}(len(rf.logs) - 1)
 							}
 							RaftDebug("server", rf.me, "appendEntries success to", server)
+							rf.mu.Unlock()
 							return
 
 						}
 
-						if rf.nextIndex[server] > 1 {
-							rf.nextIndex[server] --
+						if rf.nextIndex[server] <= 1 {
+							RaftDebug("server", rf.me, "appendEntries fail to", server, "nextIndex", rf.nextIndex[server], "exit")
+							rf.mu.Unlock()
+							return
 						}
-						RaftDebug("server", rf.me, "appendEntries fail to", server, "nextIndex", rf.nextIndex[server])
+
+						rf.nextIndex[server] --
+						RaftDebug("server", rf.me, "appendEntries fail to", server, "nextIndex", rf.nextIndex[server], "retry...")
+						rf.mu.Unlock()
+						continue
 					}
+
+					return
 				}
 			}(i)
 		}
@@ -532,7 +542,7 @@ func (rf *Raft) Kill() {
 //
 
 func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(rand.Int()%500+300) * time.Millisecond
+	return time.Duration(rand.Int()%500+200) * time.Millisecond
 }
 
 func (rf *Raft) setRole(role RaftRole) {
