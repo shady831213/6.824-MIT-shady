@@ -53,7 +53,7 @@ const (
 	RaftStop
 )
 
-const RaftHeartBeatPeriod = 200 * time.Millisecond
+const RaftHeartBeatPeriod = 150 * time.Millisecond
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -99,8 +99,9 @@ type Raft struct {
 		server int
 	}
 	appendEntriesResp chan struct {
-		reply  *AppendEntriesReply
-		server int
+		reply        *AppendEntriesReply
+		server       int
+		matchedIndex int
 	}
 	// persistent states
 	currentTerm int
@@ -158,6 +159,7 @@ func (rf *Raft) lastLogEntryInfo() (int, int) {
 //must be inside critical region
 func (rf *Raft) lastFollowerEntryInfo(follower int) (int, int, int) {
 	index := rf.nextIndex[follower] - 1
+	RaftDebug("matchedIndex of follower", follower, index, rf.nextIndex[follower])
 	return index, rf.logs[index].Term, rf.commitIndex
 }
 
@@ -436,9 +438,10 @@ func (rf *Raft) sendOneAppendEntries(server int) bool {
 			//deal response
 			RaftDebug("server", rf.me, "get appendEntries response from", server)
 			rf.appendEntriesResp <- struct {
-				reply  *AppendEntriesReply
-				server int
-			}{reply: &reply, server: server}
+				reply        *AppendEntriesReply
+				server       int
+				matchedIndex int
+			}{reply: &reply, server: server, matchedIndex: lastIndex + len(entries)}
 
 		}
 	}
@@ -508,7 +511,7 @@ func (rf *Raft) Kill() {
 //
 
 func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(rand.Int()%500+300) * time.Millisecond
+	return time.Duration(rand.Int()%500)*time.Millisecond + 2*RaftHeartBeatPeriod
 }
 
 func (rf *Raft) setRole(role RaftRole) {
@@ -710,6 +713,7 @@ func (rf *Raft) leaderState() {
 	}
 	rf.matchedIndex = make([]int, len(rf.peers))
 	rf.mu.Unlock()
+	rf.sendAppendEntries()
 	for {
 		select {
 		case <-rf.ctx.Done():
@@ -770,18 +774,18 @@ func (rf *Raft) leaderState() {
 				return
 			}
 			if resp.reply.Success {
-				rf.nextIndex[resp.server] = len(rf.logs)
-				rf.matchedIndex[resp.server] = len(rf.logs) - 1
-				if len(rf.logs)-1 > rf.commitIndex {
-					rf.updateCommitIndex(len(rf.logs) - 1)
+				rf.nextIndex[resp.server] = resp.matchedIndex + 1
+				rf.matchedIndex[resp.server] = resp.matchedIndex
+				if resp.matchedIndex > rf.commitIndex {
+					rf.updateCommitIndex(resp.matchedIndex)
 				}
-				RaftDebug("server", rf.me, "appendEntries success to", resp.server)
+				RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.nextIndex[resp.server])
 				rf.mu.Unlock()
 				break
 			}
 			if rf.nextIndex[resp.server] > 1 {
 				rf.nextIndex[resp.server] --
-				RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "nextIndex", rf.nextIndex[resp.server], "retry...")
+				RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "retry...")
 				go rf.sendOneAppendEntries(resp.server)
 			}
 			rf.mu.Unlock()
@@ -829,8 +833,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		server int
 	})
 	rf.appendEntriesResp = make(chan struct {
-		reply  *AppendEntriesReply
-		server int
+		reply        *AppendEntriesReply
+		server       int
+		matchedIndex int
 	})
 	rf.currentTerm = 0
 	rf.votedFor = -1
