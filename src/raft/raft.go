@@ -53,7 +53,7 @@ const (
 	RaftStop
 )
 
-const RaftHeartBeatPeriod = 150 * time.Millisecond
+const RaftHeartBeatPeriod = 100 * time.Millisecond
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -131,7 +131,6 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) apply(applyChan chan ApplyMsg) {
 	rf.mu.Lock()
 	commitIndex := rf.commitIndex
-
 	rf.mu.Unlock()
 	for commitIndex > rf.lastApplied {
 		rf.mu.Lock()
@@ -511,7 +510,7 @@ func (rf *Raft) Kill() {
 //
 
 func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(rand.Int()%500)*time.Millisecond + 2*RaftHeartBeatPeriod
+	return time.Duration(rand.Int()%100+100)*time.Millisecond + RaftHeartBeatPeriod
 }
 
 func (rf *Raft) setRole(role RaftRole) {
@@ -635,7 +634,9 @@ func (rf *Raft) candidateState() {
 	for {
 		select {
 		case <-rf.ctx.Done():
+			rf.mu.Lock()
 			rf.setRole(RaftStop)
+			rf.mu.Unlock()
 			return
 		case req := <-rf.voteReq:
 			rf.mu.Lock()
@@ -717,7 +718,9 @@ func (rf *Raft) leaderState() {
 	for {
 		select {
 		case <-rf.ctx.Done():
+			rf.mu.Lock()
 			rf.setRole(RaftStop)
+			rf.mu.Unlock()
 			return
 		case req := <-rf.voteReq:
 			rf.mu.Lock()
@@ -791,7 +794,7 @@ func (rf *Raft) leaderState() {
 			rf.mu.Unlock()
 			break
 		case <-time.After(RaftHeartBeatPeriod):
-			RaftDebug("server", rf.me, "send appendEntries in leaderState")
+			RaftDebug("server", rf.me, "timeout in leaderState")
 			rf.sendAppendEntries()
 			break
 		}
@@ -854,7 +857,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			select {
 			case <-rf.ctx.Done():
 				return
-			case <-time.After(2 * RaftHeartBeatPeriod):
+			case <-time.After(RaftHeartBeatPeriod):
 				rf.apply(applyCh)
 				break
 			}
