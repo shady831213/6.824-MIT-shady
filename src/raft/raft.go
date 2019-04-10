@@ -423,6 +423,7 @@ func (rf *Raft) sendOneAppendEntries(server int) bool {
 		entries = append(entries, rf.logs[lastIndex+1:]...)
 	}
 	rf.mu.Unlock()
+	RaftDebug("server", rf.me, "before send appendEntries to", server, "role", role)
 	if role == RaftLeader {
 		reply := AppendEntriesReply{}
 		RaftDebug("server", rf.me, "send appendEntries to", server)
@@ -510,11 +511,28 @@ func (rf *Raft) Kill() {
 //
 
 func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(rand.Int()%100+100)*time.Millisecond + RaftHeartBeatPeriod
+	return time.Duration(rand.Int()%10+2) * RaftHeartBeatPeriod
 }
 
-func (rf *Raft) setRole(role RaftRole) {
+func (rf *Raft) setRole(role RaftRole, actions ...func()) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.role = role
+	for _, f := range actions {
+		f()
+	}
+}
+
+func (rf *Raft) updateTerm(term int) bool {
+	update := false
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.currentTerm < term {
+		rf.votedFor = -1
+		rf.currentTerm = term
+		update = true
+	}
+	return update
 }
 
 func (rf *Raft) updateCommitIndex(index int) {
@@ -553,70 +571,49 @@ func (rf *Raft) fsm() {
 
 func (rf *Raft) followerState() {
 	RaftDebug("server", rf.me, "enter followerState")
+	now := time.Now()
 	for {
 		select {
 		case <-rf.ctx.Done():
-			rf.mu.Lock()
 			rf.setRole(RaftStop)
-			rf.mu.Unlock()
 			return
 		case req := <-rf.voteReq:
 			RaftDebug("server", rf.me, "get vote request from", req.args.CandidateId, "in follwerState")
-			rf.mu.Lock()
-			if rf.currentTerm < req.args.Term {
-				rf.votedFor = -1
-				rf.currentTerm = req.args.Term
-			}
-			rf.requestVote(req.args, req.reply)
-
-			req.done <- struct{}{}
-			close(req.done)
-			RaftDebug("server", rf.me, "response vote request to", req.args.CandidateId, "in follwerState")
-			rf.mu.Unlock()
+			rf.updateTerm(req.args.Term)
+			rf.setRole(RaftFollower, func() {
+				rf.requestVote(req.args, req.reply)
+				req.done <- struct{}{}
+				close(req.done)
+				RaftDebug("server", rf.me, "response vote request to", req.args.CandidateId, "in follwerState")
+			})
 			if req.reply.VoteGranted {
 				return
 			}
 			break
 		case req := <-rf.appendEntriesReq:
 			RaftDebug("server", rf.me, "get appendEntriesReq request from", req.args.LeaderId, "in follwerState")
-			rf.mu.Lock()
-			if rf.currentTerm < req.args.Term {
-				rf.votedFor = -1
-				rf.currentTerm = req.args.Term
-			}
-			rf.appendEntries(req.args, req.reply)
-			req.done <- struct{}{}
-			close(req.done)
-			rf.mu.Unlock()
+			rf.updateTerm(req.args.Term)
+			rf.setRole(RaftFollower, func() {
+				rf.appendEntries(req.args, req.reply)
+				req.done <- struct{}{}
+				close(req.done)
+			})
 			return
 		case resp := <-rf.voteResp:
 			RaftDebug("server", rf.me, "get vote resp from", resp.server, "in follwerState")
-			rf.mu.Lock()
-			if rf.currentTerm < resp.reply.Term {
-				rf.votedFor = -1
-				rf.currentTerm = resp.reply.Term
-				rf.mu.Unlock()
+			if rf.updateTerm(resp.reply.Term) {
 				return
 			}
-			rf.mu.Unlock()
 			break
 		case resp := <-rf.appendEntriesResp:
 			RaftDebug("server", rf.me, "get appendEntriesResp from", resp.server, "in follwerState")
-			rf.mu.Lock()
-			if rf.currentTerm < resp.reply.Term {
-				rf.votedFor = -1
-				rf.currentTerm = resp.reply.Term
-				rf.mu.Unlock()
+			if rf.updateTerm(resp.reply.Term) {
 				return
 			}
-			rf.mu.Unlock()
 			break
 		case <-time.After(rf.getElectionTimeout()):
-			RaftDebug("server", rf.me, "timeout in follwerState")
-			//vote for self
-			rf.mu.Lock()
+			RaftDebug("server", rf.me, "timeout in follwerState", "duration", time.Since(now), "now", time.Now())
 			rf.setRole(RaftCandidate)
-			rf.mu.Unlock()
 			return
 		}
 	}
@@ -630,50 +627,38 @@ func (rf *Raft) candidateState() {
 	rf.mu.Unlock()
 	votes := 1
 	rf.sendRequestVote()
+	now := time.Now()
 	//change state
 	for {
 		select {
 		case <-rf.ctx.Done():
-			rf.mu.Lock()
 			rf.setRole(RaftStop)
-			rf.mu.Unlock()
 			return
 		case req := <-rf.voteReq:
-			rf.mu.Lock()
-			if rf.currentTerm < req.args.Term {
-				rf.votedFor = -1
-				rf.currentTerm = req.args.Term
-				rf.setRole(RaftFollower)
-				RaftDebug("server", rf.me, "exit to followerState in candidateState")
-				rf.requestVote(req.args, req.reply)
-				rf.mu.Unlock()
-				req.done <- struct{}{}
+			if rf.updateTerm(req.args.Term) {
+				rf.setRole(RaftFollower, func() {
+					rf.requestVote(req.args, req.reply)
+					req.done <- struct{}{}
+					close(req.done)
+				})
 				return
 			}
-			rf.requestVote(req.args, req.reply)
-			rf.mu.Unlock()
-			req.done <- struct{}{}
+			rf.setRole(RaftCandidate, func() {
+				rf.requestVote(req.args, req.reply)
+				req.done <- struct{}{}
+				close(req.done)
+			})
 			break
 		case req := <-rf.appendEntriesReq:
-			rf.mu.Lock()
-			if rf.currentTerm < req.args.Term {
-				rf.votedFor = -1
-				rf.currentTerm = req.args.Term
-				RaftDebug("server", rf.me, "exit to followerState in candidateState")
-			}
-			rf.appendEntries(req.args, req.reply)
-			rf.setRole(RaftFollower)
-			rf.mu.Unlock()
-			req.done <- struct{}{}
+			rf.updateTerm(req.args.Term)
+			rf.setRole(RaftFollower, func() {
+				rf.appendEntries(req.args, req.reply)
+				req.done <- struct{}{}
+				close(req.done)
+			})
 			return
 		case resp := <-rf.voteResp:
-			rf.mu.Lock()
-			if rf.currentTerm < resp.reply.Term {
-				rf.votedFor = -1
-				rf.currentTerm = resp.reply.Term
-				rf.setRole(RaftFollower)
-				RaftDebug("server", rf.me, "exit to followerState in candidateState")
-				rf.mu.Unlock()
+			if rf.updateTerm(resp.reply.Term) {
 				return
 			}
 			if resp.reply.VoteGranted {
@@ -681,25 +666,18 @@ func (rf *Raft) candidateState() {
 				votes++
 				if votes > len(rf.peers)/2 {
 					rf.setRole(RaftLeader)
-					rf.mu.Unlock()
 					return
 				}
 			}
-			rf.mu.Unlock()
 			break
 		case resp := <-rf.appendEntriesResp:
-			rf.mu.Lock()
-			if rf.currentTerm < resp.reply.Term {
-				rf.votedFor = -1
-				rf.currentTerm = resp.reply.Term
+			if rf.updateTerm(resp.reply.Term) {
 				rf.setRole(RaftFollower)
-				RaftDebug("server", rf.me, "exit to followerState in candidateState")
-				rf.mu.Unlock()
 				return
 			}
-			rf.mu.Unlock()
 			break
 		case <-time.After(rf.getElectionTimeout()):
+			RaftDebug("server", rf.me, "timeout in candidateState", "duration", time.Since(now), "now", time.Now())
 			return
 		}
 	}
@@ -716,85 +694,73 @@ func (rf *Raft) leaderState() {
 	rf.mu.Unlock()
 	rf.sendAppendEntries()
 	for {
+		now := time.Now()
 		select {
 		case <-rf.ctx.Done():
-			rf.mu.Lock()
 			rf.setRole(RaftStop)
-			rf.mu.Unlock()
 			return
 		case req := <-rf.voteReq:
-			rf.mu.Lock()
-			if rf.currentTerm < req.args.Term {
-				rf.votedFor = -1
-				rf.currentTerm = req.args.Term
-				rf.setRole(RaftFollower)
-				RaftDebug("server", rf.me, "exit to followerState in leaderState")
-				rf.requestVote(req.args, req.reply)
-				rf.mu.Unlock()
-				req.done <- struct{}{}
+			if rf.updateTerm(req.args.Term) {
+				rf.setRole(RaftFollower, func() {
+					rf.requestVote(req.args, req.reply)
+					req.done <- struct{}{}
+					close(req.done)
+				})
 				return
 			}
-			rf.requestVote(req.args, req.reply)
-			rf.mu.Unlock()
-			req.done <- struct{}{}
+			rf.setRole(RaftLeader, func() {
+				rf.requestVote(req.args, req.reply)
+				req.done <- struct{}{}
+				close(req.done)
+			})
 			break
 		case req := <-rf.appendEntriesReq:
-			rf.mu.Lock()
-			if rf.currentTerm < req.args.Term {
-				rf.votedFor = -1
-				rf.currentTerm = req.args.Term
-				RaftDebug("server", rf.me, "exit to followerState in leaderState")
-				rf.setRole(RaftFollower)
-				rf.appendEntries(req.args, req.reply)
-				rf.mu.Unlock()
-				req.done <- struct{}{}
+			if rf.updateTerm(req.args.Term) {
+				rf.setRole(RaftFollower, func() {
+					rf.appendEntries(req.args, req.reply)
+					req.done <- struct{}{}
+					close(req.done)
+				})
 				return
 			}
-			rf.appendEntries(req.args, req.reply)
-			rf.mu.Unlock()
-			req.done <- struct{}{}
+			rf.setRole(RaftLeader, func() {
+				rf.appendEntries(req.args, req.reply)
+				req.done <- struct{}{}
+				close(req.done)
+			})
 			break
 		case resp := <-rf.voteResp:
-			rf.mu.Lock()
-			if rf.currentTerm < resp.reply.Term {
-				rf.votedFor = -1
-				rf.currentTerm = resp.reply.Term
+			if rf.updateTerm(resp.reply.Term) {
 				rf.setRole(RaftFollower)
-				RaftDebug("server", rf.me, "exit to followerState in leaderState")
-				rf.mu.Unlock()
 				return
 			}
-			rf.mu.Unlock()
 			break
 		case resp := <-rf.appendEntriesResp:
-			rf.mu.Lock()
-			if rf.currentTerm < resp.reply.Term {
-				rf.votedFor = -1
-				rf.currentTerm = resp.reply.Term
+			if rf.updateTerm(resp.reply.Term) {
 				rf.setRole(RaftFollower)
-				RaftDebug("server", rf.me, "exit to followerState in leaderState")
-				rf.mu.Unlock()
 				return
 			}
 			if resp.reply.Success {
-				rf.nextIndex[resp.server] = resp.matchedIndex + 1
-				rf.matchedIndex[resp.server] = resp.matchedIndex
-				if resp.matchedIndex > rf.commitIndex {
-					rf.updateCommitIndex(resp.matchedIndex)
-				}
-				RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.nextIndex[resp.server])
-				rf.mu.Unlock()
+				rf.setRole(RaftLeader, func() {
+					rf.nextIndex[resp.server] = resp.matchedIndex + 1
+					rf.matchedIndex[resp.server] = resp.matchedIndex
+					if resp.matchedIndex > rf.commitIndex {
+						rf.updateCommitIndex(resp.matchedIndex)
+					}
+					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.nextIndex[resp.server])
+				})
 				break
 			}
-			if rf.nextIndex[resp.server] > 1 {
-				rf.nextIndex[resp.server] --
-				RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "retry...")
-				go rf.sendOneAppendEntries(resp.server)
-			}
-			rf.mu.Unlock()
+			rf.setRole(RaftLeader, func() {
+				if rf.nextIndex[resp.server] > 1 {
+					rf.nextIndex[resp.server] --
+					RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "retry...")
+					go rf.sendOneAppendEntries(resp.server)
+				}
+			})
 			break
 		case <-time.After(RaftHeartBeatPeriod):
-			RaftDebug("server", rf.me, "timeout in leaderState")
+			RaftDebug("server", rf.me, "timeout in leaderState", "duration", time.Since(now), "now", time.Now())
 			rf.sendAppendEntries()
 			break
 		}
