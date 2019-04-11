@@ -492,23 +492,22 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	}
 	//check conflict
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "logs", rf.logs, "entries", req.args.Entries)
-	newEntries := req.args.Entries
-	rf.logs = rf.logs[:req.args.PrevLogIndex+1]
 	if req.args.PrevLogIndex < len(rf.logs)-1 {
 		for i, e := range rf.logs[req.args.PrevLogIndex+1:] {
-			if i-req.args.PrevLogIndex > len(newEntries)-1 {
+			if i > len(req.args.Entries)-1 {
 				break
 			}
-			if e.Term != newEntries[i-req.args.PrevLogIndex].Term {
-				rf.logs = rf.logs[:i]
-				newEntries = newEntries[i-req.args.PrevLogIndex:]
+			if e.Term != req.args.Entries[i].Term {
+				rf.logs = append(rf.logs[:i+req.args.PrevLogIndex+1], req.args.Entries[i:]...)
 				break
 			}
 		}
+	} else {
+		//rf.logs all committed
+		rf.logs = append(rf.logs, req.args.Entries...)
 	}
 	//append new entries
-	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "newEntries", newEntries, "logs", rf.logs, "entries", req.args.Entries)
-	rf.logs = append(rf.logs, newEntries...)
+	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "logs", rf.logs, "entries", req.args.Entries)
 
 	//update commitIndex
 	if req.args.LeaderCommit > rf.commitIndex {
