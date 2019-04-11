@@ -593,8 +593,18 @@ func (rf *Raft) fsm() {
 	}
 }
 
-func (rf *Raft) followerState() {
-	RaftDebug("server", rf.me, "enter followerState")
+type raftStateOpts struct {
+	stateName               string
+	timeout                 time.Duration
+	timeoutAction           func() bool
+	requestVoteReqAction    func(*requestVoteReq) bool
+	requestVoteRespAction   func(*requestVoteResp) bool
+	appendEntriesReqAction  func(*appendEntriesReq) bool
+	appendEntriesRespAction func(*appendEntriesResp) bool
+}
+
+func (rf *Raft) stateHandler(opts raftStateOpts) {
+	RaftDebug("server", rf.me, "enter", opts.stateName)
 	now := time.Now()
 	for {
 		select {
@@ -602,96 +612,118 @@ func (rf *Raft) followerState() {
 			rf.setRole(RaftStop)
 			return
 		case req := <-rf.voteReqCh:
-			RaftDebug("server", rf.me, "get vote request from", req.args.CandidateId, "in follwerState")
-			rf.backToFollower(req.args.Term, func() {
-				rf.requestVote(req)
-				RaftDebug("server", rf.me, "response vote request to", req.args.CandidateId, "in follwerState")
-			})
-			if req.reply.VoteGranted {
+			RaftDebug("server", rf.me, "get vote request from", req.args.CandidateId, "in", opts.stateName)
+			if opts.requestVoteReqAction(req) {
 				return
 			}
 			break
 		case req := <-rf.appendEntriesReqCh:
-			RaftDebug("server", rf.me, "get appendEntriesReq request from", req.args.LeaderId, "in follwerState")
-			rf.backToFollower(req.args.Term, func() {
-				rf.appendEntries(req)
-			})
-			return
+			RaftDebug("server", rf.me, "get appendEntriesReq request from", req.args.LeaderId, "in", opts.stateName)
+			if opts.appendEntriesReqAction(req) {
+				return
+			}
+			break
 		case resp := <-rf.voteRespCh:
-			RaftDebug("server", rf.me, "get vote resp from", resp.server, "in follwerState")
-			if rf.backToFollower(resp.reply.Term) {
+			RaftDebug("server", rf.me, "get vote resp from", resp.server, "in", opts.stateName)
+			if opts.requestVoteRespAction(resp) {
 				return
 			}
 			break
 		case resp := <-rf.appendEntriesRespCh:
-			RaftDebug("server", rf.me, "get appendEntriesResp from", resp.server, "in follwerState")
-			if rf.backToFollower(resp.reply.Term) {
+			RaftDebug("server", rf.me, "get appendEntriesResp from", resp.server, "in", opts.stateName)
+			if opts.appendEntriesRespAction(resp) {
 				return
 			}
 			break
-		case <-time.After(rf.getElectionTimeout()):
-			RaftDebug("server", rf.me, "timeout in follwerState", "duration", time.Since(now), "now", time.Now())
-			rf.setRole(RaftCandidate)
-			return
+		case <-time.After(opts.timeout):
+			RaftDebug("server", rf.me, "timeout in", opts.stateName, "duration", time.Since(now), "now", time.Now())
+			if opts.timeoutAction() {
+				return
+			}
+			break
 		}
 	}
 }
 
+func (rf *Raft) followerState() {
+	rf.stateHandler(raftStateOpts{
+		stateName: "followerState",
+		timeout:   rf.getElectionTimeout(),
+		timeoutAction: func() bool {
+			rf.setRole(RaftCandidate)
+			return true
+		},
+		requestVoteReqAction: func(req *requestVoteReq) bool {
+			rf.backToFollower(req.args.Term, func() {
+				rf.requestVote(req)
+			})
+			if req.reply.VoteGranted {
+				return true
+			}
+			return false
+		},
+		requestVoteRespAction: func(resp *requestVoteResp) bool {
+			return rf.backToFollower(resp.reply.Term)
+		},
+		appendEntriesReqAction: func(req *appendEntriesReq) bool {
+			rf.backToFollower(req.args.Term, func() {
+				rf.appendEntries(req)
+			})
+			return true
+		},
+		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
+			return rf.backToFollower(resp.reply.Term)
+		},
+	})
+}
+
 func (rf *Raft) candidateState() {
-	RaftDebug("server", rf.me, "enter candidateState")
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.mu.Unlock()
 	votes := 1
 	rf.sendRequestVote()
-	now := time.Now()
-	//change state
-	for {
-		select {
-		case <-rf.ctx.Done():
-			rf.setRole(RaftStop)
-			return
-		case req := <-rf.voteReqCh:
-			if rf.backToFollower(req.args.Term, func() {
+
+	rf.stateHandler(raftStateOpts{
+		stateName: "candidateState",
+		timeout:   rf.getElectionTimeout(),
+		timeoutAction: func() bool {
+			return true
+		},
+		requestVoteReqAction: func(req *requestVoteReq) bool {
+			return rf.backToFollower(req.args.Term, func() {
 				rf.requestVote(req)
-			}) {
-				return
-			}
-			break
-		case req := <-rf.appendEntriesReqCh:
-			rf.backToFollower(req.args.Term, func() {
-				rf.appendEntries(req)
 			})
-			rf.setRole(RaftFollower)
-			return
-		case resp := <-rf.voteRespCh:
+		},
+		requestVoteRespAction: func(resp *requestVoteResp) bool {
 			if rf.backToFollower(resp.reply.Term) {
-				return
+				return true
 			}
 			if resp.reply.VoteGranted {
 				RaftDebug("server", rf.me, "get request vote response and get a vote from", resp.server)
 				votes++
 				if votes > len(rf.peers)/2 {
 					rf.setRole(RaftLeader)
-					return
+					return true
 				}
 			}
-			break
-		case resp := <-rf.appendEntriesRespCh:
-			if rf.backToFollower(resp.reply.Term) {
-				return
-			}
-			break
-		case <-time.After(rf.getElectionTimeout()):
-			RaftDebug("server", rf.me, "timeout in candidateState", "duration", time.Since(now), "now", time.Now())
-			return
-		}
-	}
+			return false
+		},
+		appendEntriesReqAction: func(req *appendEntriesReq) bool {
+			rf.backToFollower(req.args.Term, func() {
+				rf.appendEntries(req)
+			})
+			rf.setRole(RaftFollower)
+			return true
+		},
+		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
+			return rf.backToFollower(resp.reply.Term)
+		},
+	})
 }
 
 func (rf *Raft) leaderState() {
-	RaftDebug("server", rf.me, "enter leaderState")
 	rf.mu.Lock()
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
@@ -700,34 +732,30 @@ func (rf *Raft) leaderState() {
 	rf.matchedIndex = make([]int, len(rf.peers))
 	rf.mu.Unlock()
 	rf.sendAppendEntries()
-	for {
-		now := time.Now()
-		select {
-		case <-rf.ctx.Done():
-			rf.setRole(RaftStop)
-			return
-		case req := <-rf.voteReqCh:
-			if rf.backToFollower(req.args.Term, func() {
+
+	rf.stateHandler(raftStateOpts{
+		stateName: "leaderState",
+		timeout:   RaftHeartBeatPeriod,
+		timeoutAction: func() bool {
+			rf.sendAppendEntries()
+			return false
+		},
+		requestVoteReqAction: func(req *requestVoteReq) bool {
+			return rf.backToFollower(req.args.Term, func() {
 				rf.requestVote(req)
-			}) {
-				return
-			}
-			break
-		case req := <-rf.appendEntriesReqCh:
-			if rf.backToFollower(req.args.Term, func() {
+			})
+		},
+		requestVoteRespAction: func(resp *requestVoteResp) bool {
+			return rf.backToFollower(resp.reply.Term)
+		},
+		appendEntriesReqAction: func(req *appendEntriesReq) bool {
+			return rf.backToFollower(req.args.Term, func() {
 				rf.appendEntries(req)
-			}) {
-				return
-			}
-			break
-		case resp := <-rf.voteRespCh:
+			})
+		},
+		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
 			if rf.backToFollower(resp.reply.Term) {
-				return
-			}
-			break
-		case resp := <-rf.appendEntriesRespCh:
-			if rf.backToFollower(resp.reply.Term) {
-				return
+				return true
 			}
 			if resp.reply.Success {
 				rf.setRole(RaftLeader, func() {
@@ -739,7 +767,7 @@ func (rf *Raft) leaderState() {
 					}
 					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.nextIndex[resp.server])
 				})
-				break
+				return false
 			}
 			rf.setRole(RaftLeader, func() {
 				if rf.nextIndex[resp.server] > 1 {
@@ -748,13 +776,9 @@ func (rf *Raft) leaderState() {
 					go rf.sendOneAppendEntries(resp.server)
 				}
 			})
-			break
-		case <-time.After(RaftHeartBeatPeriod):
-			RaftDebug("server", rf.me, "timeout in leaderState", "duration", time.Since(now), "now", time.Now())
-			rf.sendAppendEntries()
-			break
-		}
-	}
+			return false
+		},
+	})
 }
 
 //
