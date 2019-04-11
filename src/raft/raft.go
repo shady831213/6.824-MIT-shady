@@ -595,7 +595,7 @@ func (rf *Raft) fsm() {
 
 type raftStateOpts struct {
 	stateName               string
-	timeout                 time.Duration
+	timeout                 func() time.Duration
 	timeoutAction           func() bool
 	requestVoteReqAction    func(*requestVoteReq) bool
 	requestVoteRespAction   func(*requestVoteResp) bool
@@ -604,8 +604,8 @@ type raftStateOpts struct {
 }
 
 func (rf *Raft) stateHandler(opts raftStateOpts) {
-	RaftDebug("server", rf.me, "enter", opts.stateName)
 	now := time.Now()
+	RaftDebug("server", rf.me, "enter", opts.stateName, "now", now)
 	for {
 		select {
 		case <-rf.ctx.Done():
@@ -635,7 +635,7 @@ func (rf *Raft) stateHandler(opts raftStateOpts) {
 				return
 			}
 			break
-		case <-time.After(opts.timeout):
+		case <-time.After(opts.timeout()):
 			RaftDebug("server", rf.me, "timeout in", opts.stateName, "duration", time.Since(now), "now", time.Now())
 			if opts.timeoutAction() {
 				return
@@ -648,7 +648,7 @@ func (rf *Raft) stateHandler(opts raftStateOpts) {
 func (rf *Raft) followerState() {
 	rf.stateHandler(raftStateOpts{
 		stateName: "followerState",
-		timeout:   rf.getElectionTimeout(),
+		timeout:   rf.getElectionTimeout,
 		timeoutAction: func() bool {
 			rf.setRole(RaftCandidate)
 			return true
@@ -687,7 +687,7 @@ func (rf *Raft) candidateState() {
 
 	rf.stateHandler(raftStateOpts{
 		stateName: "candidateState",
-		timeout:   rf.getElectionTimeout(),
+		timeout:   rf.getElectionTimeout,
 		timeoutAction: func() bool {
 			return true
 		},
@@ -735,7 +735,9 @@ func (rf *Raft) leaderState() {
 
 	rf.stateHandler(raftStateOpts{
 		stateName: "leaderState",
-		timeout:   RaftHeartBeatPeriod,
+		timeout: func() time.Duration {
+			return RaftHeartBeatPeriod
+		},
 		timeoutAction: func() bool {
 			rf.sendAppendEntries()
 			return false
