@@ -524,13 +524,18 @@ func (rf *Raft) getElectionTimeout() time.Duration {
 	return time.Duration(rand.Int()%10+2) * RaftHeartBeatPeriod
 }
 
-func (rf *Raft) setRole(role RaftRole, actions ...func()) {
+func (rf *Raft) doActions(actions ...func()) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.role = role
 	for _, f := range actions {
 		f()
 	}
+}
+
+func (rf *Raft) setRole(role RaftRole, actions ...func()) {
+	rf.doActions(append([]func(){func() {
+		rf.role = role
+	}}, actions...)...)
 }
 
 func (rf *Raft) updateTerm(term int) bool {
@@ -543,6 +548,15 @@ func (rf *Raft) updateTerm(term int) bool {
 		update = true
 	}
 	return update
+}
+
+func (rf *Raft) backToFollower(term int, actions ...func()) bool {
+	if rf.updateTerm(term) {
+		rf.setRole(RaftFollower, actions...)
+		return true
+	}
+	rf.doActions(actions...)
+	return false
 }
 
 func (rf *Raft) updateCommitIndex(index int) {
@@ -589,8 +603,7 @@ func (rf *Raft) followerState() {
 			return
 		case req := <-rf.voteReqCh:
 			RaftDebug("server", rf.me, "get vote request from", req.args.CandidateId, "in follwerState")
-			rf.updateTerm(req.args.Term)
-			rf.setRole(RaftFollower, func() {
+			rf.backToFollower(req.args.Term, func() {
 				rf.requestVote(req)
 				RaftDebug("server", rf.me, "response vote request to", req.args.CandidateId, "in follwerState")
 			})
@@ -600,20 +613,19 @@ func (rf *Raft) followerState() {
 			break
 		case req := <-rf.appendEntriesReqCh:
 			RaftDebug("server", rf.me, "get appendEntriesReq request from", req.args.LeaderId, "in follwerState")
-			rf.updateTerm(req.args.Term)
-			rf.setRole(RaftFollower, func() {
+			rf.backToFollower(req.args.Term, func() {
 				rf.appendEntries(req)
 			})
 			return
 		case resp := <-rf.voteRespCh:
 			RaftDebug("server", rf.me, "get vote resp from", resp.server, "in follwerState")
-			if rf.updateTerm(resp.reply.Term) {
+			if rf.backToFollower(resp.reply.Term) {
 				return
 			}
 			break
 		case resp := <-rf.appendEntriesRespCh:
 			RaftDebug("server", rf.me, "get appendEntriesResp from", resp.server, "in follwerState")
-			if rf.updateTerm(resp.reply.Term) {
+			if rf.backToFollower(resp.reply.Term) {
 				return
 			}
 			break
@@ -641,25 +653,20 @@ func (rf *Raft) candidateState() {
 			rf.setRole(RaftStop)
 			return
 		case req := <-rf.voteReqCh:
-			if rf.updateTerm(req.args.Term) {
-				rf.setRole(RaftFollower, func() {
-					rf.requestVote(req)
-				})
+			if rf.backToFollower(req.args.Term, func() {
+				rf.requestVote(req)
+			}) {
 				return
 			}
-			rf.setRole(RaftCandidate, func() {
-				rf.requestVote(req)
-			})
 			break
 		case req := <-rf.appendEntriesReqCh:
-			rf.updateTerm(req.args.Term)
-			rf.setRole(RaftFollower, func() {
+			rf.backToFollower(req.args.Term, func() {
 				rf.appendEntries(req)
 			})
+			rf.setRole(RaftFollower)
 			return
 		case resp := <-rf.voteRespCh:
-			if rf.updateTerm(resp.reply.Term) {
-				rf.setRole(RaftFollower)
+			if rf.backToFollower(resp.reply.Term) {
 				return
 			}
 			if resp.reply.VoteGranted {
@@ -672,8 +679,7 @@ func (rf *Raft) candidateState() {
 			}
 			break
 		case resp := <-rf.appendEntriesRespCh:
-			if rf.updateTerm(resp.reply.Term) {
-				rf.setRole(RaftFollower)
+			if rf.backToFollower(resp.reply.Term) {
 				return
 			}
 			break
@@ -701,36 +707,26 @@ func (rf *Raft) leaderState() {
 			rf.setRole(RaftStop)
 			return
 		case req := <-rf.voteReqCh:
-			if rf.updateTerm(req.args.Term) {
-				rf.setRole(RaftFollower, func() {
-					rf.requestVote(req)
-				})
+			if rf.backToFollower(req.args.Term, func() {
+				rf.requestVote(req)
+			}) {
 				return
 			}
-			rf.setRole(RaftLeader, func() {
-				rf.requestVote(req)
-			})
 			break
 		case req := <-rf.appendEntriesReqCh:
-			if rf.updateTerm(req.args.Term) {
-				rf.setRole(RaftFollower, func() {
-					rf.appendEntries(req)
-				})
+			if rf.backToFollower(req.args.Term, func() {
+				rf.appendEntries(req)
+			}) {
 				return
 			}
-			rf.setRole(RaftLeader, func() {
-				rf.appendEntries(req)
-			})
 			break
 		case resp := <-rf.voteRespCh:
-			if rf.updateTerm(resp.reply.Term) {
-				rf.setRole(RaftFollower)
+			if rf.backToFollower(resp.reply.Term) {
 				return
 			}
 			break
 		case resp := <-rf.appendEntriesRespCh:
-			if rf.updateTerm(resp.reply.Term) {
-				rf.setRole(RaftFollower)
+			if rf.backToFollower(resp.reply.Term) {
 				return
 			}
 			if resp.reply.Success {
