@@ -81,28 +81,13 @@ type Raft struct {
 
 	debug bool
 	//role state
-	role    RaftRole
-	ctx     context.Context
-	cancel  func()
-	voteReq chan struct {
-		args  *RequestVoteArgs
-		reply *RequestVoteReply
-		done  chan struct{}
-	}
-	appendEntriesReq chan struct {
-		args  *AppendEntriesArgs
-		reply *AppendEntriesReply
-		done  chan struct{}
-	}
-	voteResp chan struct {
-		reply  *RequestVoteReply
-		server int
-	}
-	appendEntriesResp chan struct {
-		reply        *AppendEntriesReply
-		server       int
-		matchedIndex int
-	}
+	role                RaftRole
+	ctx                 context.Context
+	cancel              func()
+	voteReqCh           chan *requestVoteReq
+	appendEntriesReqCh  chan *appendEntriesReq
+	voteRespCh          chan *requestVoteResp
+	appendEntriesRespCh chan *appendEntriesResp
 	// persistent states
 	currentTerm int
 	votedFor    int
@@ -222,40 +207,21 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type requestVoteReq struct {
+	args  *RequestVoteArgs
+	reply *RequestVoteReply
+	done  chan struct{}
+}
+
+type requestVoteResp struct {
+	args   *RequestVoteArgs
+	reply  *RequestVoteReply
+	server int
+}
+
 //
 // example RequestVote RPC handler.
 //
-
-//must be inside critical region
-func (rf *Raft) requestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	lastIndex, lastTerm := rf.lastLogEntryInfo()
-	reply.Term = rf.currentTerm
-	RaftDebug("server", rf.me, "term", rf.currentTerm, "request term", args.Term)
-	if args.Term < rf.currentTerm {
-		reply.VoteGranted = false
-		return
-	}
-	RaftDebug("server", rf.me, "votedFor", rf.votedFor, "request id", args.CandidateId)
-	if rf.votedFor >= 0 && rf.votedFor != args.CandidateId {
-		reply.VoteGranted = false
-		return
-	}
-
-	RaftDebug("server", rf.me, "LastLogTerm", lastTerm, "request LastLogTerm", args.LastLogTerm)
-	if args.LastLogTerm < lastTerm {
-		reply.VoteGranted = false
-		return
-	}
-	RaftDebug("server", rf.me, "LastLogIndex", lastIndex, "request LastLogIndex", args.LastLogIndex)
-	if args.LastLogTerm == lastTerm && args.LastLogIndex < lastIndex {
-		reply.VoteGranted = false
-		return
-	}
-
-	reply.VoteGranted = true
-	rf.votedFor = args.CandidateId
-	RaftDebug("server", rf.me, "vote to", args.CandidateId)
-}
 
 //the whole rpc must be atomic, then update state
 //suppose rpc1 update term, then release lock, and rpc2 get lock update term again,
@@ -265,14 +231,14 @@ func (rf *Raft) requestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	RaftDebug("server", rf.me, "get request vote rpc from", args.CandidateId)
-	done := make(chan struct{})
-	rf.voteReq <- struct {
-		args  *RequestVoteArgs
-		reply *RequestVoteReply
-		done  chan struct{}
-	}{args: args, reply: reply, done: done}
+	req := requestVoteReq{
+		args:  args,
+		reply: reply,
+		done:  make(chan struct{}),
+	}
+	rf.voteReqCh <- &req
 	RaftDebug("server", rf.me, "waiting for vote rpc response to", args.CandidateId)
-	<-done
+	<-req.done
 	RaftDebug("server", rf.me, "response request vote rpc to", args.CandidateId)
 }
 
@@ -296,64 +262,28 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-//must be inside critical region
-func (rf *Raft) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	RaftDebug("server", rf.me, "term", rf.currentTerm, "request term", args.Term, "server role", rf.role)
-	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		reply.Success = false
-		return
-	}
-	//not exist
-	if args.PrevLogIndex > len(rf.logs)-1 {
-		reply.Success = false
-		return
-	}
-	//term not match
-	if entry := rf.logs[args.PrevLogIndex]; entry.Term != args.PrevLogTerm {
-		reply.Success = false
-		return
-	}
-	//check conflict
-	RaftDebug("server", rf.me, "get appendEntries rpc from", args.LeaderId, "PrevLogIndex", args.PrevLogIndex, "logs", rf.logs, "entries", args.Entries)
-	newEntries := args.Entries
-	rf.logs = rf.logs[:args.PrevLogIndex+1]
-	if args.PrevLogIndex < len(rf.logs)-1 {
-		for i, e := range rf.logs[args.PrevLogIndex+1:] {
-			if i-args.PrevLogIndex > len(newEntries)-1 {
-				break
-			}
-			if e.Term != newEntries[i-args.PrevLogIndex].Term {
-				rf.logs = rf.logs[:i]
-				newEntries = newEntries[i-args.PrevLogIndex:]
-				break
-			}
-		}
-	}
-	//append new entries
-	RaftDebug("server", rf.me, "get appendEntries rpc from", args.LeaderId, "newEntries", newEntries, "logs", rf.logs, "entries", args.Entries)
-	rf.logs = append(rf.logs, newEntries...)
+type appendEntriesReq struct {
+	args  *AppendEntriesArgs
+	reply *AppendEntriesReply
+	done  chan struct{}
+}
 
-	//update commitIndex
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = len(rf.logs) - 1
-		if args.LeaderCommit < rf.commitIndex {
-			rf.commitIndex = args.LeaderCommit
-		}
-	}
-	reply.Success = true
+type appendEntriesResp struct {
+	args   *AppendEntriesArgs
+	reply  *AppendEntriesReply
+	server int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	RaftDebug("server", rf.me, "get appendEntries rpc from", args.LeaderId)
 	// Your code here (2A, 2B).
-	done := make(chan struct{})
-	rf.appendEntriesReq <- struct {
-		args  *AppendEntriesArgs
-		reply *AppendEntriesReply
-		done  chan struct{}
-	}{args: args, reply: reply, done: done}
-	<-done
+	req := appendEntriesReq{
+		args:  args,
+		reply: reply,
+		done:  make(chan struct{}),
+	}
+	rf.appendEntriesReqCh <- &req
+	<-req.done
 }
 
 //
@@ -394,19 +324,17 @@ func (rf *Raft) sendRequestVote() {
 				term, role := rf.getState()
 				rf.mu.Unlock()
 				if role == RaftCandidate {
-					reply := RequestVoteReply{}
-					RaftDebug("server", rf.me, "send request vote to", server)
-					if ok := rf.peers[server].Call("Raft.RequestVote", &RequestVoteArgs{
+					args := RequestVoteArgs{
 						term,
 						rf.me,
 						lastIndex,
-						lastTerm}, &reply); ok {
+						lastTerm}
+					reply := RequestVoteReply{}
+					RaftDebug("server", rf.me, "send request vote to", server)
+					if ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply); ok {
 						//deal response
 						RaftDebug("server", rf.me, "get request vote response from", server)
-						rf.voteResp <- struct {
-							reply  *RequestVoteReply
-							server int
-						}{reply: &reply, server: server}
+						rf.voteRespCh <- &requestVoteResp{args: &args, reply: &reply, server: server}
 					}
 				}
 			}(i)
@@ -425,23 +353,20 @@ func (rf *Raft) sendOneAppendEntries(server int) bool {
 	rf.mu.Unlock()
 	RaftDebug("server", rf.me, "before send appendEntries to", server, "role", role)
 	if role == RaftLeader {
-		reply := AppendEntriesReply{}
-		RaftDebug("server", rf.me, "send appendEntries to", server)
-		if ok := rf.peers[server].Call("Raft.AppendEntries", &AppendEntriesArgs{
+		args := AppendEntriesArgs{
 			Term:         term,
 			LeaderId:     rf.me,
 			PrevLogIndex: lastIndex,
 			PrevLogTerm:  lastTerm,
 			Entries:      entries,
 			LeaderCommit: commitIndex,
-		}, &reply); ok {
+		}
+		reply := AppendEntriesReply{}
+		RaftDebug("server", rf.me, "send appendEntries to", server)
+		if ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply); ok {
 			//deal response
 			RaftDebug("server", rf.me, "get appendEntries response from", server)
-			rf.appendEntriesResp <- struct {
-				reply        *AppendEntriesReply
-				server       int
-				matchedIndex int
-			}{reply: &reply, server: server, matchedIndex: lastIndex + len(entries)}
+			rf.appendEntriesRespCh <- &appendEntriesResp{args: &args, reply: &reply, server: server}
 
 		}
 	}
@@ -510,6 +435,91 @@ func (rf *Raft) Kill() {
 // Raft state machine
 //
 
+func (rf *Raft) requestVote(req *requestVoteReq) {
+	defer func() {
+		req.done <- struct{}{}
+		close(req.done)
+	}()
+	lastIndex, lastTerm := rf.lastLogEntryInfo()
+	req.reply.Term = rf.currentTerm
+	RaftDebug("server", rf.me, "term", rf.currentTerm, "request term", req.args.Term)
+	if req.args.Term < rf.currentTerm {
+		req.reply.VoteGranted = false
+		return
+	}
+	RaftDebug("server", rf.me, "votedFor", rf.votedFor, "request id", req.args.CandidateId)
+	if rf.votedFor >= 0 && rf.votedFor != req.args.CandidateId {
+		req.reply.VoteGranted = false
+		return
+	}
+
+	RaftDebug("server", rf.me, "LastLogTerm", lastTerm, "request LastLogTerm", req.args.LastLogTerm)
+	if req.args.LastLogTerm < lastTerm {
+		req.reply.VoteGranted = false
+		return
+	}
+	RaftDebug("server", rf.me, "LastLogIndex", lastIndex, "request LastLogIndex", req.args.LastLogIndex)
+	if req.args.LastLogTerm == lastTerm && req.args.LastLogIndex < lastIndex {
+		req.reply.VoteGranted = false
+		return
+	}
+
+	req.reply.VoteGranted = true
+	rf.votedFor = req.args.CandidateId
+	RaftDebug("server", rf.me, "vote to", req.args.CandidateId)
+}
+
+func (rf *Raft) appendEntries(req *appendEntriesReq) {
+	defer func() {
+		req.done <- struct{}{}
+		close(req.done)
+	}()
+	RaftDebug("server", rf.me, "term", rf.currentTerm, "request term", req.args.Term, "server role", rf.role)
+	req.reply.Term = rf.currentTerm
+	if req.args.Term < rf.currentTerm {
+		req.reply.Success = false
+		return
+	}
+	//not exist
+	if req.args.PrevLogIndex > len(rf.logs)-1 {
+		req.reply.Success = false
+		return
+	}
+	//term not match
+	if entry := rf.logs[req.args.PrevLogIndex]; entry.Term != req.args.PrevLogTerm {
+		req.reply.Success = false
+		return
+	}
+	//check conflict
+	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "logs", rf.logs, "entries", req.args.Entries)
+	newEntries := req.args.Entries
+	rf.logs = rf.logs[:req.args.PrevLogIndex+1]
+	if req.args.PrevLogIndex < len(rf.logs)-1 {
+		for i, e := range rf.logs[req.args.PrevLogIndex+1:] {
+			if i-req.args.PrevLogIndex > len(newEntries)-1 {
+				break
+			}
+			if e.Term != newEntries[i-req.args.PrevLogIndex].Term {
+				rf.logs = rf.logs[:i]
+				newEntries = newEntries[i-req.args.PrevLogIndex:]
+				break
+			}
+		}
+	}
+	//append new entries
+	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "newEntries", newEntries, "logs", rf.logs, "entries", req.args.Entries)
+	rf.logs = append(rf.logs, newEntries...)
+
+	//update commitIndex
+	if req.args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = len(rf.logs) - 1
+		if req.args.LeaderCommit < rf.commitIndex {
+			rf.commitIndex = req.args.LeaderCommit
+		}
+	}
+	req.reply.Success = true
+}
+
 func (rf *Raft) getElectionTimeout() time.Duration {
 	return time.Duration(rand.Int()%10+2) * RaftHeartBeatPeriod
 }
@@ -577,35 +587,31 @@ func (rf *Raft) followerState() {
 		case <-rf.ctx.Done():
 			rf.setRole(RaftStop)
 			return
-		case req := <-rf.voteReq:
+		case req := <-rf.voteReqCh:
 			RaftDebug("server", rf.me, "get vote request from", req.args.CandidateId, "in follwerState")
 			rf.updateTerm(req.args.Term)
 			rf.setRole(RaftFollower, func() {
-				rf.requestVote(req.args, req.reply)
-				req.done <- struct{}{}
-				close(req.done)
+				rf.requestVote(req)
 				RaftDebug("server", rf.me, "response vote request to", req.args.CandidateId, "in follwerState")
 			})
 			if req.reply.VoteGranted {
 				return
 			}
 			break
-		case req := <-rf.appendEntriesReq:
+		case req := <-rf.appendEntriesReqCh:
 			RaftDebug("server", rf.me, "get appendEntriesReq request from", req.args.LeaderId, "in follwerState")
 			rf.updateTerm(req.args.Term)
 			rf.setRole(RaftFollower, func() {
-				rf.appendEntries(req.args, req.reply)
-				req.done <- struct{}{}
-				close(req.done)
+				rf.appendEntries(req)
 			})
 			return
-		case resp := <-rf.voteResp:
+		case resp := <-rf.voteRespCh:
 			RaftDebug("server", rf.me, "get vote resp from", resp.server, "in follwerState")
 			if rf.updateTerm(resp.reply.Term) {
 				return
 			}
 			break
-		case resp := <-rf.appendEntriesResp:
+		case resp := <-rf.appendEntriesRespCh:
 			RaftDebug("server", rf.me, "get appendEntriesResp from", resp.server, "in follwerState")
 			if rf.updateTerm(resp.reply.Term) {
 				return
@@ -634,31 +640,26 @@ func (rf *Raft) candidateState() {
 		case <-rf.ctx.Done():
 			rf.setRole(RaftStop)
 			return
-		case req := <-rf.voteReq:
+		case req := <-rf.voteReqCh:
 			if rf.updateTerm(req.args.Term) {
 				rf.setRole(RaftFollower, func() {
-					rf.requestVote(req.args, req.reply)
-					req.done <- struct{}{}
-					close(req.done)
+					rf.requestVote(req)
 				})
 				return
 			}
 			rf.setRole(RaftCandidate, func() {
-				rf.requestVote(req.args, req.reply)
-				req.done <- struct{}{}
-				close(req.done)
+				rf.requestVote(req)
 			})
 			break
-		case req := <-rf.appendEntriesReq:
+		case req := <-rf.appendEntriesReqCh:
 			rf.updateTerm(req.args.Term)
 			rf.setRole(RaftFollower, func() {
-				rf.appendEntries(req.args, req.reply)
-				req.done <- struct{}{}
-				close(req.done)
+				rf.appendEntries(req)
 			})
 			return
-		case resp := <-rf.voteResp:
+		case resp := <-rf.voteRespCh:
 			if rf.updateTerm(resp.reply.Term) {
+				rf.setRole(RaftFollower)
 				return
 			}
 			if resp.reply.VoteGranted {
@@ -670,7 +671,7 @@ func (rf *Raft) candidateState() {
 				}
 			}
 			break
-		case resp := <-rf.appendEntriesResp:
+		case resp := <-rf.appendEntriesRespCh:
 			if rf.updateTerm(resp.reply.Term) {
 				rf.setRole(RaftFollower)
 				return
@@ -699,53 +700,46 @@ func (rf *Raft) leaderState() {
 		case <-rf.ctx.Done():
 			rf.setRole(RaftStop)
 			return
-		case req := <-rf.voteReq:
+		case req := <-rf.voteReqCh:
 			if rf.updateTerm(req.args.Term) {
 				rf.setRole(RaftFollower, func() {
-					rf.requestVote(req.args, req.reply)
-					req.done <- struct{}{}
-					close(req.done)
+					rf.requestVote(req)
 				})
 				return
 			}
 			rf.setRole(RaftLeader, func() {
-				rf.requestVote(req.args, req.reply)
-				req.done <- struct{}{}
-				close(req.done)
+				rf.requestVote(req)
 			})
 			break
-		case req := <-rf.appendEntriesReq:
+		case req := <-rf.appendEntriesReqCh:
 			if rf.updateTerm(req.args.Term) {
 				rf.setRole(RaftFollower, func() {
-					rf.appendEntries(req.args, req.reply)
-					req.done <- struct{}{}
-					close(req.done)
+					rf.appendEntries(req)
 				})
 				return
 			}
 			rf.setRole(RaftLeader, func() {
-				rf.appendEntries(req.args, req.reply)
-				req.done <- struct{}{}
-				close(req.done)
+				rf.appendEntries(req)
 			})
 			break
-		case resp := <-rf.voteResp:
+		case resp := <-rf.voteRespCh:
 			if rf.updateTerm(resp.reply.Term) {
 				rf.setRole(RaftFollower)
 				return
 			}
 			break
-		case resp := <-rf.appendEntriesResp:
+		case resp := <-rf.appendEntriesRespCh:
 			if rf.updateTerm(resp.reply.Term) {
 				rf.setRole(RaftFollower)
 				return
 			}
 			if resp.reply.Success {
 				rf.setRole(RaftLeader, func() {
-					rf.nextIndex[resp.server] = resp.matchedIndex + 1
-					rf.matchedIndex[resp.server] = resp.matchedIndex
-					if resp.matchedIndex > rf.commitIndex {
-						rf.updateCommitIndex(resp.matchedIndex)
+					matchedIndex := resp.args.PrevLogIndex + len(resp.args.Entries)
+					rf.nextIndex[resp.server] = matchedIndex + 1
+					rf.matchedIndex[resp.server] = matchedIndex
+					if matchedIndex > rf.commitIndex {
+						rf.updateCommitIndex(matchedIndex)
 					}
 					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.nextIndex[resp.server])
 				})
@@ -787,25 +781,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = RaftFollower
-	rf.voteReq = make(chan struct {
-		args  *RequestVoteArgs
-		reply *RequestVoteReply
-		done  chan struct{}
-	})
-	rf.appendEntriesReq = make(chan struct {
-		args  *AppendEntriesArgs
-		reply *AppendEntriesReply
-		done  chan struct{}
-	})
-	rf.voteResp = make(chan struct {
-		reply  *RequestVoteReply
-		server int
-	})
-	rf.appendEntriesResp = make(chan struct {
-		reply        *AppendEntriesReply
-		server       int
-		matchedIndex int
-	})
+	rf.voteReqCh = make(chan *requestVoteReq, len(rf.peers))
+	rf.appendEntriesReqCh = make(chan *appendEntriesReq, len(rf.peers))
+	rf.voteRespCh = make(chan *requestVoteResp, len(rf.peers))
+	rf.appendEntriesRespCh = make(chan *appendEntriesResp, len(rf.peers))
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = []RaftLogEntry{{0, 0}}
