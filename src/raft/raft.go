@@ -20,6 +20,7 @@ package raft
 import (
 	"context"
 	"flag"
+	"fmt"
 	"labrpc"
 	"log"
 	"math/rand"
@@ -260,6 +261,9 @@ type AppendEntriesReply struct {
 	// Your data here (2A).
 	Term    int
 	Success bool
+	//optimization
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 type appendEntriesReq struct {
@@ -483,11 +487,20 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	//not exist
 	if req.args.PrevLogIndex > len(rf.logs)-1 {
 		req.reply.Success = false
+		req.reply.ConflictIndex = len(rf.logs)
+		req.reply.ConflictTerm = -1
 		return
 	}
 	//term not match
 	if entry := rf.logs[req.args.PrevLogIndex]; entry.Term != req.args.PrevLogTerm {
 		req.reply.Success = false
+		req.reply.ConflictTerm = entry.Term
+		for i := req.args.PrevLogIndex; i >= 0; i -- {
+			if rf.logs[i].Term != req.reply.ConflictTerm {
+				req.reply.ConflictIndex = i + 1
+				break
+			}
+		}
 		return
 	}
 	//check conflict
@@ -776,11 +789,24 @@ func (rf *Raft) leaderState() {
 				return false
 			}
 			rf.setRole(RaftLeader, func() {
-				if rf.nextIndex[resp.server] > 1 {
-					rf.nextIndex[resp.server] --
-					RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "retry...")
-					go rf.sendOneAppendEntries(resp.server)
+				if resp.reply.ConflictIndex < 1 {
+					fmt.Println("resp.reply.ConflictIndex", resp.reply.ConflictIndex, "resp.reply.Term", resp.reply.Term, "term", rf.currentTerm)
+					panic("resp.reply.ConflictIndex < 1 only when leader term < follower term, leader should have return to follower already!")
 				}
+				if resp.reply.ConflictTerm < 0 {
+					rf.nextIndex[resp.server] = resp.reply.ConflictIndex
+				} else {
+					conflictIndex := resp.reply.ConflictIndex
+					for i := rf.nextIndex[resp.server] - 1; i >= 0; i-- {
+						if rf.logs[i].Term == resp.reply.ConflictTerm {
+							conflictIndex = i + 1
+							break
+						}
+					}
+					rf.nextIndex[resp.server] = conflictIndex
+				}
+				RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "retry...")
+				go rf.sendOneAppendEntries(resp.server)
 			})
 			return false
 		},
