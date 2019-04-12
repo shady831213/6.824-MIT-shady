@@ -604,6 +604,10 @@ type raftStateOpts struct {
 
 func (rf *Raft) stateHandler(opts raftStateOpts) {
 	now := time.Now()
+	timer := time.NewTimer(opts.timeout())
+	defer func() {
+		timer.Stop()
+	}()
 	RaftDebug("server", rf.me, "enter", opts.stateName, "now", now)
 	for {
 		select {
@@ -634,11 +638,12 @@ func (rf *Raft) stateHandler(opts raftStateOpts) {
 				return
 			}
 			break
-		case <-time.After(opts.timeout()):
+		case <-timer.C:
 			RaftDebug("server", rf.me, "timeout in", opts.stateName, "duration", time.Since(now), "now", time.Now())
 			if opts.timeoutAction() {
 				return
 			}
+			timer.Reset(opts.timeout())
 			break
 		}
 	}
