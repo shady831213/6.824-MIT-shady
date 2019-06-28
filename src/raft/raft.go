@@ -528,21 +528,12 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	//check conflict
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "can update entries")
 	if req.args.PrevLogIndex < len(rf.logs)-1 {
-		for i, e := range rf.logs[req.args.PrevLogIndex+1:] {
-			if i > len(req.args.Entries)-1 {
-				break
-			}
-			if e.Term != req.args.Entries[i].Term {
-				rf.logs = append(rf.logs[:i+req.args.PrevLogIndex+1], req.args.Entries[i:]...)
-				rf.persist()
-				break
-			}
-		}
+		rf.logs = append(rf.logs[:req.args.PrevLogIndex+1], req.args.Entries...)
 	} else {
 		//rf.logs all committed
 		rf.logs = append(rf.logs, req.args.Entries...)
-		rf.persist()
 	}
+	rf.persist()
 	//append new entries
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "logs", rf.logs, "entries", req.args.Entries)
 
@@ -555,6 +546,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	}
 
 	req.reply.Success = true
+
 }
 
 func (rf *Raft) getElectionTimeout() time.Duration {
@@ -583,8 +575,8 @@ func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 		rf.votedFor = -1
 		rf.currentTerm = term
 		rf.role = RaftFollower
-		rf.persist()
 		update = true
+		rf.persist()
 	}
 	rf.mu.Unlock()
 	rf.doActions(actions...)
