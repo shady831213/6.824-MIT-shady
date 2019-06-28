@@ -720,8 +720,7 @@ func (rf *Raft) candidateState() {
 	rf.votedFor = rf.me
 	rf.persist()
 	rf.mu.Unlock()
-	votes := make([]bool, len(rf.peers))
-	votes[rf.me] = true
+	votes := 1
 	rf.sendRequestVote()
 
 	rf.stateHandler(raftStateOpts{
@@ -741,13 +740,9 @@ func (rf *Raft) candidateState() {
 			}
 			if resp.reply.VoteGranted {
 				RaftDebug("server", rf.me, "get request vote response and get a vote from", resp.server)
-				votes[resp.server] = true
-				count := 0
-				for _, v := range votes {
-					if v {
-						count++
-					}
-					if count > len(rf.peers)/2 {
+				if rf.currentTerm == resp.reply.Term {
+					votes++
+					if votes > len(rf.peers)/2 {
 						rf.setRole(RaftLeader)
 						return true
 					}
@@ -818,6 +813,9 @@ func (rf *Raft) leaderState() {
 				return false
 			}
 			rf.setRole(RaftLeader, func() {
+				if resp.reply.Term > resp.args.Term {
+					return
+				}
 				if resp.reply.ConflictIndex < 1 {
 					fmt.Println("resp.reply.ConflictIndex", resp.reply.ConflictIndex, "resp.reply.Term", resp.reply.Term, "term", rf.currentTerm, "reply from", resp.server, "to", rf.me)
 					panic("resp.reply.ConflictIndex < 1 only when leader term < follower term, leader should have return to follower already!")
