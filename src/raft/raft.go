@@ -18,9 +18,11 @@ package raft
 //
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"labgob"
 	"labrpc"
 	"log"
 	"math/rand"
@@ -122,9 +124,9 @@ func (rf *Raft) apply(applyChan chan ApplyMsg) {
 		rf.mu.Lock()
 		rf.lastApplied++
 		command := rf.logs[rf.lastApplied].Command
-		RaftDebug("sever", rf.me, "applyIndex", rf.lastApplied, "commitIndex", commitIndex, "log", rf.logs)
+		RaftDebug("server", rf.me, "applyIndex", rf.lastApplied, "commitIndex", commitIndex, "log", rf.logs)
 		rf.mu.Unlock()
-		RaftDebug("sever", rf.me, "apply", ApplyMsg{true, command, rf.lastApplied})
+		RaftDebug("server", rf.me, "apply", ApplyMsg{true, command, rf.lastApplied})
 		applyChan <- ApplyMsg{true, command, rf.lastApplied}
 	}
 }
@@ -144,7 +146,7 @@ func (rf *Raft) lastLogEntryInfo() (int, int) {
 //must be inside critical region
 func (rf *Raft) lastFollowerEntryInfo(follower int) (int, int, int) {
 	index := rf.nextIndex[follower] - 1
-	RaftDebug("matchedIndex of follower", follower, index, rf.nextIndex[follower])
+	RaftDebug("server", rf.me, "matchedIndex of follower", follower, index, rf.nextIndex[follower])
 	return index, rf.logs[index].Term, rf.commitIndex
 }
 
@@ -162,6 +164,12 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	rf.persister.SaveRaftState(w.Bytes())
 }
 
 //
@@ -184,6 +192,17 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if e := d.Decode(&rf.currentTerm); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&rf.votedFor); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&rf.logs); e != nil {
+		panic(e)
+	}
 }
 
 //
@@ -399,11 +418,13 @@ func (rf *Raft) sendAppendEntries() {
 // term. the third return value is true if this server believes it is
 // the leader.
 //
-func (rf *Raft) start(command interface{}) int {
+func (rf *Raft) start(entry RaftLogEntry) int {
 	var index int
 	rf.mu.Lock()
 	index = len(rf.logs)
-	rf.logs = append(rf.logs, RaftLogEntry{command, rf.currentTerm})
+	rf.logs = append(rf.logs, entry)
+	rf.persist()
+	RaftDebug("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
 	rf.mu.Unlock()
 	rf.sendAppendEntries()
 	return index
@@ -413,13 +434,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
 	// Your code here (2B).
 	if term, isLeader = rf.GetState(); !isLeader {
 		return index, term, isLeader
 	}
-
-	index = rf.start(command)
+	index = rf.start(RaftLogEntry{command, term})
 
 	return index, term, isLeader
 }
@@ -432,6 +451,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	RaftDebug("server", rf.me, "shutdown!")
 	rf.cancel()
 }
 
@@ -470,6 +490,7 @@ func (rf *Raft) requestVote(req *requestVoteReq) {
 
 	req.reply.VoteGranted = true
 	rf.votedFor = req.args.CandidateId
+	rf.persist()
 	RaftDebug("server", rf.me, "vote to", req.args.CandidateId)
 }
 
@@ -484,6 +505,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		req.reply.Success = false
 		return
 	}
+	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "logs", rf.logs, "entries", req.args.Entries)
 	//not exist
 	if req.args.PrevLogIndex > len(rf.logs)-1 {
 		req.reply.Success = false
@@ -504,7 +526,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		return
 	}
 	//check conflict
-	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "logs", rf.logs, "entries", req.args.Entries)
+	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "can update entries")
 	if req.args.PrevLogIndex < len(rf.logs)-1 {
 		for i, e := range rf.logs[req.args.PrevLogIndex+1:] {
 			if i > len(req.args.Entries)-1 {
@@ -512,12 +534,14 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 			}
 			if e.Term != req.args.Entries[i].Term {
 				rf.logs = append(rf.logs[:i+req.args.PrevLogIndex+1], req.args.Entries[i:]...)
+				rf.persist()
 				break
 			}
 		}
 	} else {
 		//rf.logs all committed
 		rf.logs = append(rf.logs, req.args.Entries...)
+		rf.persist()
 	}
 	//append new entries
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "logs", rf.logs, "entries", req.args.Entries)
@@ -529,6 +553,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 			rf.commitIndex = req.args.LeaderCommit
 		}
 	}
+
 	req.reply.Success = true
 }
 
@@ -550,25 +575,20 @@ func (rf *Raft) setRole(role RaftRole, actions ...func()) {
 	}}, actions...)...)
 }
 
-func (rf *Raft) updateTerm(term int) bool {
+//update term and set role must be atomic
+func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 	update := false
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if rf.currentTerm < term {
 		rf.votedFor = -1
 		rf.currentTerm = term
+		rf.role = RaftFollower
+		rf.persist()
 		update = true
 	}
-	return update
-}
-
-func (rf *Raft) backToFollower(term int, actions ...func()) bool {
-	if rf.updateTerm(term) {
-		rf.setRole(RaftFollower, actions...)
-		return true
-	}
+	rf.mu.Unlock()
 	rf.doActions(actions...)
-	return false
+	return update
 }
 
 func (rf *Raft) updateCommitIndex(index int) {
@@ -698,8 +718,10 @@ func (rf *Raft) candidateState() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.mu.Unlock()
-	votes := 1
+	votes := make([]bool, len(rf.peers))
+	votes[rf.me] = true
 	rf.sendRequestVote()
 
 	rf.stateHandler(raftStateOpts{
@@ -719,10 +741,16 @@ func (rf *Raft) candidateState() {
 			}
 			if resp.reply.VoteGranted {
 				RaftDebug("server", rf.me, "get request vote response and get a vote from", resp.server)
-				votes++
-				if votes > len(rf.peers)/2 {
-					rf.setRole(RaftLeader)
-					return true
+				votes[resp.server] = true
+				count := 0
+				for _, v := range votes {
+					if v {
+						count++
+					}
+					if count > len(rf.peers)/2 {
+						rf.setRole(RaftLeader)
+						return true
+					}
 				}
 			}
 			return false
@@ -781,16 +809,17 @@ func (rf *Raft) leaderState() {
 					matchedIndex := resp.args.PrevLogIndex + len(resp.args.Entries)
 					rf.nextIndex[resp.server] = matchedIndex + 1
 					rf.matchedIndex[resp.server] = matchedIndex
-					if matchedIndex > rf.commitIndex {
+					//for Figure 8
+					if matchedIndex > rf.commitIndex && resp.args.PrevLogTerm == rf.currentTerm {
 						rf.updateCommitIndex(matchedIndex)
 					}
-					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.nextIndex[resp.server])
+					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.matchedIndex[resp.server])
 				})
 				return false
 			}
 			rf.setRole(RaftLeader, func() {
 				if resp.reply.ConflictIndex < 1 {
-					fmt.Println("resp.reply.ConflictIndex", resp.reply.ConflictIndex, "resp.reply.Term", resp.reply.Term, "term", rf.currentTerm)
+					fmt.Println("resp.reply.ConflictIndex", resp.reply.ConflictIndex, "resp.reply.Term", resp.reply.Term, "term", rf.currentTerm, "reply from", resp.server, "to", rf.me)
 					panic("resp.reply.ConflictIndex < 1 only when leader term < follower term, leader should have return to follower already!")
 				}
 				if resp.reply.ConflictTerm < 0 {
