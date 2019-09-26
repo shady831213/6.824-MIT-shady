@@ -117,17 +117,18 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 func (rf *Raft) apply(applyChan chan ApplyMsg) {
+	entries := make([]RaftLogEntry, 0)
+	lastApplied := rf.lastApplied + 1
 	rf.mu.Lock()
-	commitIndex := rf.commitIndex
+	if rf.lastApplied < rf.commitIndex {
+		entries = append(entries, rf.logs[rf.lastApplied + 1:rf.commitIndex+1]...)
+	}
+	rf.lastApplied = rf.commitIndex
 	rf.mu.Unlock()
-	for commitIndex > rf.lastApplied {
-		rf.mu.Lock()
-		rf.lastApplied++
-		command := rf.logs[rf.lastApplied].Command
-		RaftDebug("server", rf.me, "applyIndex", rf.lastApplied, "commitIndex", commitIndex, "log", rf.logs)
-		rf.mu.Unlock()
-		RaftDebug("server", rf.me, "apply", ApplyMsg{true, command, rf.lastApplied})
-		applyChan <- ApplyMsg{true, command, rf.lastApplied}
+	for i, entry := range entries {
+		//RaftDebug("server", rf.me, "applyIndex", rf.lastApplied, "commitIndex", rf.commitIndex, "log", rf.logs)
+		//RaftDebug("server", rf.me, "apply", ApplyMsg{true, command, rf.lastApplied})
+		applyChan <- ApplyMsg{true, entry.Command, lastApplied + i}
 	}
 }
 
