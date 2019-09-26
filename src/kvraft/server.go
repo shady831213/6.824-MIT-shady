@@ -51,24 +51,26 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	db       map[string]string
-	ctx      context.Context
-	cancel   func()
-	commit   chan KVCommit
-	curIndex int
+	db           map[string]string
+	ctx          context.Context
+	cancel       func()
+	commit       chan KVCommit
+	curIndex     int
+	pendingIndex []int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	op := Op{GET, kv.me, args.Key, ""}
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
+		kv.mu.Unlock()
 		return
 	}
-	kv.curIndex = index
+	kv.pendingIndex = append(kv.pendingIndex, index)
+	kv.mu.Unlock()
 	commit := <-kv.commit
 	reply.Err = commit.Err
 	reply.WrongLeader = commit.WrongLeader
@@ -78,18 +80,26 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	DPrintf("get PutAppend me: %d %+v %+v", kv.me, args, reply)
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	//if args.Retry && args.LastCommit < kv.curIndex {
+	//	DPrintf("ignore PutAppend me: %d %+v %+v curIndex:%d", kv.me, args, reply, kv.curIndex)
+	//	kv.mu.Unlock()
+	//	return
+	//}
 	op := Op{(OPCode)(args.Op), kv.me, args.Key, args.Value}
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
+		kv.mu.Unlock()
 		return
 	}
-	kv.curIndex = index
+	kv.pendingIndex = append(kv.pendingIndex, index)
+	kv.mu.Unlock()
 	commit := <-kv.commit
 	reply.Err = commit.Err
 	reply.WrongLeader = commit.WrongLeader
+	reply.CommitIdx = index
 	DPrintf("reply PutAppend me: %d %+v %+v", kv.me, args, reply)
 }
 
@@ -112,7 +122,6 @@ func (kv *KVServer) execute(op *Op) Err {
 		} else {
 			kv.db[op.Key] = v + op.Value
 		}
-		DPrintf("Execute APPEND %s, %s", op.Key, kv.db[op.Key])
 		break
 	}
 	return OK
@@ -125,13 +134,17 @@ func (kv *KVServer) applyMap() {
 			if apply.CommandValid {
 				op, _ := (apply.Command).(Op)
 				err := kv.execute(&op)
-				if kv.curIndex == apply.CommandIndex {
+				kv.mu.Lock()
+				if len(kv.pendingIndex) != 0 && kv.pendingIndex[0] == apply.CommandIndex {
 					kv.commit <- KVCommit{
 						op.Id != kv.me,
 						err,
 						&op,
 					}
+					kv.pendingIndex = kv.pendingIndex[1:]
 				}
+				kv.curIndex = apply.CommandIndex
+				kv.mu.Unlock()
 			}
 			break
 		case <-kv.ctx.Done():
@@ -177,6 +190,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.db = make(map[string]string)
+	kv.pendingIndex = make([]int, 0)
 	kv.commit = make(chan KVCommit)
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
 

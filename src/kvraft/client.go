@@ -7,7 +7,8 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leader int
+	leader    int
+	commitIdx int
 }
 
 func nrand() int64 {
@@ -22,6 +23,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.leader = 0
+	ck.commitIdx = 0
 	return ck
 }
 
@@ -50,18 +52,15 @@ func (ck *Clerk) leadServer() *labrpc.ClientEnd {
 }
 
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{key}
 	var reply *GetReply
 	var ok bool
 	req := func() {
 		reply = &GetReply{}
+		args := GetArgs{key}
 		ok = ck.leadServer().Call("KVServer.Get", &args, reply)
 	}
 	for req(); !ok || reply.WrongLeader; req() {
 		ck.updateLeader()
-	}
-	if reply.Err != OK {
-		return (string)(reply.Err)
 	}
 	// You will have to modify this function.
 	return reply.Value
@@ -79,14 +78,18 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op}
-	req := func() (bool, PutAppendReply) {
-		reply := PutAppendReply{}
-		ok := ck.leadServer().Call("KVServer.PutAppend", &args, &reply)
-		return ok, reply
+	var reply *PutAppendReply
+	var ok bool
+	req := func(retry bool) {
+		reply = &PutAppendReply{}
+		args := PutAppendArgs{key, value, op, retry, ck.commitIdx}
+		ok = ck.leadServer().Call("KVServer.PutAppend", &args, reply)
 	}
-	for ok, reply := req(); !ok || reply.WrongLeader; ok, reply = req() {
+	for req(false); !ok || reply.WrongLeader; req(true) {
 		ck.updateLeader()
+	}
+	if reply.CommitIdx > ck.commitIdx {
+		ck.commitIdx = reply.CommitIdx
 	}
 }
 
