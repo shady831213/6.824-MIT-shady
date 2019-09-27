@@ -52,7 +52,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) nextLeaderIndex() {
-	ck.leaderIndex = int(nrand() % int64((len(ck.servers))))
+	nextIndex := int(nrand() % int64((len(ck.servers))))
+	for ;nextIndex == ck.leaderIndex; nextIndex = int(nrand() % int64((len(ck.servers)))){}
+	ck.leaderIndex = nextIndex
 }
 
 func (ck *Clerk) getServerIndex(serverId int) int {

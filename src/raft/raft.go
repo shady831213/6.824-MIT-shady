@@ -55,7 +55,7 @@ const (
 	RaftStop
 )
 
-const RaftHeartBeatPeriod = 100 * time.Millisecond
+const RaftHeartBeatPeriod = 20 * time.Millisecond
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -564,7 +564,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 }
 
 func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(rand.Int()%10+2) * RaftHeartBeatPeriod
+	return time.Duration(rand.Int()%100+200) * RaftHeartBeatPeriod
 }
 
 func (rf *Raft) doActions(actions ...func()) {
@@ -587,10 +587,11 @@ func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 	rf.mu.Lock()
 	if rf.currentTerm < term {
 		rf.votedFor = -1
-		rf.currentTerm = term
 		if rf.backToFollowerCh != nil && rf.role == RaftLeader {
+			println("server", rf.me, "from", rf.role, "to", RaftFollower, "new term", term, "currentTerm", rf.currentTerm)
 			rf.backToFollowerCh <- struct{}{}
 		}
+		rf.currentTerm = term
 		rf.role = RaftFollower
 		update = true
 		rf.persist()
@@ -795,19 +796,23 @@ func (rf *Raft) leaderState() {
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
 			return rf.backToFollower(req.args.Term, func() {
+				println("server", rf.me, "get vote req from", req.args.CandidateId, "term", req.args.Term)
 				rf.requestVote(req)
 			})
 		},
 		requestVoteRespAction: func(resp *requestVoteResp) bool {
+			println("server", rf.me, "get vote resp term", resp.reply.Term)
 			return rf.backToFollower(resp.reply.Term)
 		},
 		appendEntriesReqAction: func(req *appendEntriesReq) bool {
 			return rf.backToFollower(req.args.Term, func() {
+				println("server", rf.me, "get append req from", req.args.LeaderId, "term", req.args.Term)
 				rf.appendEntries(req)
 			})
 		},
 		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
 			if rf.backToFollower(resp.reply.Term) {
+				println("server", rf.me, "get append resp term", resp.reply.Term)
 				return true
 			}
 			if resp.reply.Success {
@@ -816,7 +821,7 @@ func (rf *Raft) leaderState() {
 					rf.nextIndex[resp.server] = matchedIndex + 1
 					rf.matchedIndex[resp.server] = matchedIndex
 					//for Figure 8
-					if matchedIndex > rf.commitIndex && resp.args.PrevLogTerm == rf.currentTerm {
+					if matchedIndex > rf.commitIndex /*&& resp.args.PrevLogTerm == rf.currentTerm*/ {
 						rf.updateCommitIndex(matchedIndex)
 					}
 					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.matchedIndex[resp.server])
