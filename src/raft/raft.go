@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"context"
 	"flag"
-	"fmt"
 	"labgob"
 	"labrpc"
 	"log"
@@ -92,6 +91,7 @@ type Raft struct {
 	appendEntriesReqCh  chan *appendEntriesReq
 	voteRespCh          chan *requestVoteResp
 	appendEntriesRespCh chan *appendEntriesResp
+	backToFollowerCh    chan struct{}
 	// persistent states
 	currentTerm int
 	votedFor    int
@@ -122,8 +122,11 @@ func (rf *Raft) apply(applyChan chan ApplyMsg) {
 	entries := make([]RaftLogEntry, 0)
 	lastApplied := rf.lastApplied + 1
 	rf.mu.Lock()
+	//println("server", rf.me, "apply, lastAppliy", rf.lastApplied, "commitIndex", rf.commitIndex, fmt.Sprintf("logs %+v", rf.logs))
 	if rf.lastApplied < rf.commitIndex {
 		entries = append(entries, rf.logs[rf.lastApplied+1:rf.commitIndex+1]...)
+		//println("server", rf.me, "apply log lastAppliy", rf.lastApplied, "commitIndex", rf.commitIndex, fmt.Sprintf("logs %+v entries %+v", rf.logs, entries))
+		//println()
 	}
 	rf.lastApplied = rf.commitIndex
 	rf.mu.Unlock()
@@ -423,6 +426,7 @@ func (rf *Raft) start(entry RaftLogEntry) int {
 	rf.logs = append(rf.logs, entry)
 	rf.persist()
 	RaftDebug("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
+	//println("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
 	rf.mu.Unlock()
 	rf.sendAppendEntries()
 	return index
@@ -465,6 +469,7 @@ func (rf *Raft) requestVote(req *requestVoteReq) {
 	}()
 	lastIndex, lastTerm := rf.lastLogEntryInfo()
 	req.reply.Term = rf.currentTerm
+	rf.leader = -1
 	RaftDebug("server", rf.me, "term", rf.currentTerm, "request term", req.args.Term)
 	if req.args.Term < rf.currentTerm {
 		req.reply.VoteGranted = false
@@ -543,6 +548,9 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 			rf.commitIndex = req.args.LeaderCommit
 		}
 	}
+	//println("server", rf.me, "update commitIndex as follower", rf.commitIndex, "log len =", len(rf.logs))
+	//fmt.Printf("logs %+v\n", rf.logs)
+	//println()
 	rf.leader = req.args.LeaderId
 	req.reply.Success = true
 
@@ -573,6 +581,9 @@ func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 	if rf.currentTerm < term {
 		rf.votedFor = -1
 		rf.currentTerm = term
+		if rf.backToFollowerCh != nil && rf.role == RaftLeader {
+			rf.backToFollowerCh <- struct{}{}
+		}
 		rf.role = RaftFollower
 		update = true
 		rf.persist()
@@ -590,6 +601,7 @@ func (rf *Raft) updateCommitIndex(index int) {
 		}
 		if count > len(rf.peers)/2 {
 			rf.commitIndex = index
+			//println("server", rf.me, "update commitIndex as leader ", rf.commitIndex)
 			return
 		}
 	}
@@ -709,6 +721,7 @@ func (rf *Raft) candidateState() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.leader = -1
 	rf.persist()
 	rf.mu.Unlock()
 	votes := 1
@@ -808,7 +821,7 @@ func (rf *Raft) leaderState() {
 					return
 				}
 				if resp.reply.ConflictIndex < 1 {
-					fmt.Println("resp.reply.ConflictIndex", resp.reply.ConflictIndex, "resp.reply.Term", resp.reply.Term, "term", rf.currentTerm, "reply from", resp.server, "to", rf.me)
+					//fmt.Println("resp.reply.ConflictIndex", resp.reply.ConflictIndex, "resp.reply.Term", resp.reply.Term, "term", rf.currentTerm, "reply from", resp.server, "to", rf.me)
 					panic("resp.reply.ConflictIndex < 1 only when leader term < follower term, leader should have return to follower already!")
 				}
 				if resp.reply.ConflictTerm < 0 {
@@ -843,13 +856,15 @@ func (rf *Raft) leaderState() {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg,
+	backToFollwer chan struct{}) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.backToFollowerCh = backToFollwer
 	rf.leader = -1
 	rf.role = RaftFollower
 	rf.voteReqCh = make(chan *requestVoteReq, len(rf.peers))

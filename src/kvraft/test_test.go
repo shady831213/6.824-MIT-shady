@@ -138,6 +138,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 		cfg.partition(pa[0], pa[1])
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
 	}
+
 }
 
 // Basic test is as follows: one or more clients submitting Append/Get
@@ -238,6 +239,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			// wait for a while so that we have a new term
 			time.Sleep(electionTimeout)
 		}
+		DPrintf("partitioner done")
 
 		if crash {
 			// log.Printf("shutdown servers\n")

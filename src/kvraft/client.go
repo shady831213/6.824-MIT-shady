@@ -1,8 +1,13 @@
 package raftkv
 
-import "labrpc"
+import (
+	"labrpc"
+	"time"
+)
 import "crypto/rand"
 import "math/big"
+
+const ClerkTimeout = 1 * time.Second
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -69,7 +74,9 @@ func (ck *Clerk) Get(key string) string {
 	req := func() {
 		reply = &GetReply{}
 		args := GetArgs{key, ck.id, ck.curSeqId}
+		DPrintf("Get req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
 		ok = ck.leadServer().Call("KVServer.Get", &args, reply)
+		DPrintf("Done Get req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
 		if ok && ck.getServerIndex(reply.Server) < 0 {
 			ck.serverIds[ck.leaderIndex] = reply.Server
 		}
@@ -105,7 +112,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	req := func() {
 		reply = &PutAppendReply{}
 		args := PutAppendArgs{key, value, op, ck.id, ck.curSeqId}
+		DPrintf("PutAppend req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
 		ok = ck.leadServer().Call("KVServer.PutAppend", &args, reply)
+		DPrintf("Done PutAppend req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
 		if ok && ck.getServerIndex(reply.Server) < 0 {
 			ck.serverIds[ck.leaderIndex] = reply.Server
 		}
