@@ -15,19 +15,20 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Retry      bool
-	LastCommit int
+	ClerkId int64
+	SeqId   int
 }
 
 type PutAppendReply struct {
 	WrongLeader bool
 	Err         Err
-	CommitIdx   int
 }
 
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	ClerkId int64
+	SeqId   int
 }
 
 type GetReply struct {

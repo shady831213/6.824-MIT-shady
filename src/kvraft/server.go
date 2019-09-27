@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -30,10 +30,12 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	OpCode OPCode
-	Id     int
-	Key    string
-	Value  string
+	OpCode   OPCode
+	ServerId int
+	ClerkId  int64
+	SeqId    int
+	Key      string
+	Value    string
 }
 
 type KVCommit struct {
@@ -52,17 +54,22 @@ type KVServer struct {
 
 	// Your definitions here.
 	db           map[string]string
+	clerkTrack   map[int64]int
 	ctx          context.Context
 	cancel       func()
 	commit       chan KVCommit
-	curIndex     int
 	pendingIndex []int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	op := Op{GET, kv.me, args.Key, ""}
+	//if seqId, ok := kv.clerkTrack[args.ClerkId]; ok && args.SeqId <= seqId {
+	//	DPrintf("ignore Get me: %d %+v %+v seqID:%d", kv.me, args, reply,seqId)
+	//	kv.mu.Unlock()
+	//	return
+	//}
+	op := Op{GET, kv.me, args.ClerkId, args.SeqId, args.Key, ""}
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
@@ -80,14 +87,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	DPrintf("get PutAppend me: %d %+v %+v", kv.me, args, reply)
 	kv.mu.Lock()
-	//if args.Retry && args.LastCommit < kv.curIndex {
-	//	DPrintf("ignore PutAppend me: %d %+v %+v curIndex:%d", kv.me, args, reply, kv.curIndex)
-	//	kv.mu.Unlock()
-	//	return
-	//}
-	op := Op{(OPCode)(args.Op), kv.me, args.Key, args.Value}
+	DPrintf("get PutAppend me: %d %+v %+v seqId: %d", kv.me, args, reply, kv.clerkTrack[args.ClerkId])
+	if seqId, ok := kv.clerkTrack[args.ClerkId]; ok && args.SeqId <= seqId {
+		DPrintf("ignore PutAppend me: %d %+v %+v seqId:%d", kv.me, args, reply, seqId)
+		kv.mu.Unlock()
+		return
+	}
+	op := Op{(OPCode)(args.Op), kv.me, args.ClerkId, args.SeqId, args.Key, args.Value}
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
@@ -99,7 +106,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	commit := <-kv.commit
 	reply.Err = commit.Err
 	reply.WrongLeader = commit.WrongLeader
-	reply.CommitIdx = index
 	DPrintf("reply PutAppend me: %d %+v %+v", kv.me, args, reply)
 }
 
@@ -137,13 +143,13 @@ func (kv *KVServer) applyMap() {
 				kv.mu.Lock()
 				if len(kv.pendingIndex) != 0 && kv.pendingIndex[0] == apply.CommandIndex {
 					kv.commit <- KVCommit{
-						op.Id != kv.me,
+						op.ServerId != kv.me,
 						err,
 						&op,
 					}
 					kv.pendingIndex = kv.pendingIndex[1:]
 				}
-				kv.curIndex = apply.CommandIndex
+				kv.clerkTrack[op.ClerkId] = op.SeqId
 				kv.mu.Unlock()
 			}
 			break
@@ -190,6 +196,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.db = make(map[string]string)
+	kv.clerkTrack = make(map[int64]int)
 	kv.pendingIndex = make([]int, 0)
 	kv.commit = make(chan KVCommit)
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
