@@ -421,13 +421,12 @@ func (rf *Raft) sendAppendEntries() {
 //
 func (rf *Raft) start(entry RaftLogEntry) int {
 	var index int
-	rf.mu.Lock()
+
 	index = len(rf.logs)
 	rf.logs = append(rf.logs, entry)
 	rf.persist()
 	RaftDebug("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
 	//println("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
-	rf.mu.Unlock()
 	rf.sendAppendEntries()
 	return index
 }
@@ -437,8 +436,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool, int) {
 	term := -1
 	isLeader := true
 	leader := -1
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// Your code here (2B).
-	if term, isLeader, leader = rf.GetState(); !isLeader {
+	if term, isLeader, leader = rf.currentTerm, rf.role == RaftLeader, rf.leader; !isLeader {
 		return index, term, isLeader, leader
 	}
 	index = rf.start(RaftLogEntry{command, term})
@@ -537,6 +538,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		//rf.logs all committed
 		rf.logs = append(rf.logs, req.args.Entries...)
 	}
+
 	rf.persist()
 	//append new entries
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "logs", rf.logs, "entries", req.args.Entries)
@@ -581,7 +583,7 @@ func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 	if rf.currentTerm < term {
 		rf.votedFor = -1
 		rf.currentTerm = term
-		if rf.backToFollowerCh != nil && rf.role == RaftLeader {
+		if rf.backToFollowerCh != nil && rf.role == RaftLeader{
 			rf.backToFollowerCh <- struct{}{}
 		}
 		rf.role = RaftFollower
