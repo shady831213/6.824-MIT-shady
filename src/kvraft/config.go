@@ -327,7 +327,7 @@ func (cfg *config) Leader() (bool, int) {
 	defer cfg.mu.Unlock()
 
 	for i := 0; i < cfg.n; i++ {
-		_, is_leader := cfg.kvservers[i].rf.GetState()
+		_, is_leader, _ := cfg.kvservers[i].rf.GetState()
 		if is_leader {
 			return true, i
 		}
@@ -335,7 +335,7 @@ func (cfg *config) Leader() (bool, int) {
 	return false, 0
 }
 
-// Partition servers into 2 groups and put current leader in minority
+// Partition servers into 2 groups and put current leaderIndex in minority
 func (cfg *config) make_partition() ([]int, []int) {
 	_, l := cfg.Leader()
 	p1 := make([]int, cfg.n/2+1)

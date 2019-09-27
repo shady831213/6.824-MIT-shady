@@ -471,7 +471,7 @@ func TestUnreliableOneKey3A(t *testing.T) {
 }
 
 // Submit a request in the minority partition and check that the requests
-// doesn't go through until the partition heals.  The leader in the original
+// doesn't go through until the partition heals.  The leaderIndex in the original
 // network ends up in the minority partition.
 func TestOnePartition3A(t *testing.T) {
 	const nservers = 5

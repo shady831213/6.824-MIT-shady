@@ -7,9 +7,10 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leader   int
-	curSeqId int
-	id       int64
+	leaderIndex int
+	curSeqId    int
+	id          int64
+	serverIds   []int
 }
 
 func nrand() int64 {
@@ -23,7 +24,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	ck.leader = 0
+	ck.serverIds = make([]int, len(servers))
+	for i := range ck.serverIds {
+		ck.serverIds[i] = -1
+	}
+	ck.leaderIndex = 0
 	ck.curSeqId = 0
 	ck.id = nrand()
 	return ck
@@ -41,16 +46,21 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 //
-func (ck *Clerk) updateLeader() {
-	if ck.leader == len(ck.servers)-1 {
-		ck.leader = 0
-	} else {
-		ck.leader ++
+func (ck *Clerk) nextLeaderIndex() {
+	ck.leaderIndex = int(nrand() % int64((len(ck.servers))))
+}
+
+func (ck *Clerk) getServerIndex(serverId int) int {
+	for i, v := range ck.serverIds {
+		if v == serverId {
+			return i
+		}
 	}
+	return -1
 }
 
 func (ck *Clerk) leadServer() *labrpc.ClientEnd {
-	return ck.servers[ck.leader]
+	return ck.servers[ck.leaderIndex]
 }
 
 func (ck *Clerk) Get(key string) string {
@@ -60,9 +70,18 @@ func (ck *Clerk) Get(key string) string {
 		reply = &GetReply{}
 		args := GetArgs{key, ck.id, ck.curSeqId}
 		ok = ck.leadServer().Call("KVServer.Get", &args, reply)
+		if ok && ck.getServerIndex(reply.Server) < 0 {
+			ck.serverIds[ck.leaderIndex] = reply.Server
+		}
 	}
 	for req(); !ok || reply.WrongLeader; req() {
-		ck.updateLeader()
+		if !ok || reply.Leader < 0 {
+			ck.nextLeaderIndex()
+		} else if index := ck.getServerIndex(reply.Leader); index < 0 {
+			ck.nextLeaderIndex()
+		} else {
+			ck.leaderIndex = index
+		}
 	}
 	ck.curSeqId ++
 	// You will have to modify this function.
@@ -87,9 +106,18 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		reply = &PutAppendReply{}
 		args := PutAppendArgs{key, value, op, ck.id, ck.curSeqId}
 		ok = ck.leadServer().Call("KVServer.PutAppend", &args, reply)
+		if ok && ck.getServerIndex(reply.Server) < 0 {
+			ck.serverIds[ck.leaderIndex] = reply.Server
+		}
 	}
 	for req(); !ok || reply.WrongLeader; req() {
-		ck.updateLeader()
+		if !ok || reply.Leader < 0 {
+			ck.nextLeaderIndex()
+		} else if index := ck.getServerIndex(reply.Leader); index < 0 {
+			ck.nextLeaderIndex()
+		} else {
+			ck.leaderIndex = index
+		}
 	}
 	ck.curSeqId ++
 }

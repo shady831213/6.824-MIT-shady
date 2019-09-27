@@ -127,7 +127,7 @@ func TestFailAgree2B(t *testing.T) {
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-	RaftDebug("disconnect", (leader + 1) % servers)
+	RaftDebug("disconnect", (leader+1)%servers)
 	// agree despite one disconnected server?
 	cfg.one(102, servers-1, false)
 	cfg.one(103, servers-1, false)
@@ -137,7 +137,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-	RaftDebug("reconnect", (leader + 1) % servers)
+	RaftDebug("reconnect", (leader+1)%servers)
 	// agree with full set of servers?
 	cfg.one(106, servers, true)
 	time.Sleep(RaftElectionTimeout)
@@ -161,7 +161,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
 
-	index, _, ok := cfg.rafts[leader].Start(20)
+	index, _, ok, _ := cfg.rafts[leader].Start(20)
 	if ok != true {
 		t.Fatalf("leader rejected Start()")
 	}
@@ -184,7 +184,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
 	leader2 := cfg.checkOneLeader()
-	index2, _, ok2 := cfg.rafts[leader2].Start(30)
+	index2, _, ok2, _ := cfg.rafts[leader2].Start(30)
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
@@ -213,7 +213,7 @@ loop:
 		}
 
 		leader := cfg.checkOneLeader()
-		_, term, ok := cfg.rafts[leader].Start(1)
+		_, term, ok, _ := cfg.rafts[leader].Start(1)
 		if !ok {
 			// leader moved on really quickly
 			continue
@@ -226,7 +226,7 @@ loop:
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				i, term1, ok := cfg.rafts[leader].Start(100 + i)
+				i, term1, ok, _ := cfg.rafts[leader].Start(100 + i)
 				if term1 != term {
 					return
 				}
@@ -241,7 +241,7 @@ loop:
 		close(is)
 
 		for j := 0; j < servers; j++ {
-			if t, _ := cfg.rafts[j].GetState(); t != term {
+			if t, _, _ := cfg.rafts[j].GetState(); t != term {
 				// term changed -- can't expect low RPC counts
 				continue loop
 			}
@@ -402,7 +402,7 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect(other)
 
 	// lots of successful commands to new group.
-	RaftDebug("bring original leader back to life ones, servers", (leader1 + 0) % servers, (leader1 + 1) % servers, other)
+	RaftDebug("bring original leader back to life ones, servers", (leader1+0)%servers, (leader1+1)%servers, other)
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
@@ -453,7 +453,7 @@ loop:
 		total1 = rpcs()
 
 		iters := 10
-		starti, term, ok := cfg.rafts[leader].Start(1)
+		starti, term, ok, _ := cfg.rafts[leader].Start(1)
 		if !ok {
 			// leader moved on really quickly
 			continue
@@ -462,7 +462,7 @@ loop:
 		for i := 1; i < iters+2; i++ {
 			x := int(rand.Int31())
 			cmds = append(cmds, x)
-			index1, term1, ok := cfg.rafts[leader].Start(x)
+			index1, term1, ok, _ := cfg.rafts[leader].Start(x)
 			if term1 != term {
 				// Term changed while starting
 				continue loop
@@ -490,7 +490,7 @@ loop:
 		failed := false
 		total2 = 0
 		for j := 0; j < servers; j++ {
-			if t, _ := cfg.rafts[j].GetState(); t != term {
+			if t, _, _ := cfg.rafts[j].GetState(); t != term {
 				// term changed -- can't expect low RPC counts
 				// need to keep going to update total2
 				failed = true
@@ -674,7 +674,7 @@ func TestFigure82C(t *testing.T) {
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
-				_, _, ok := cfg.rafts[i].Start(rand.Int())
+				_, _, ok, _ := cfg.rafts[i].Start(rand.Int())
 				if ok {
 					leader = i
 				}
@@ -761,7 +761,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 		leader := -1
 		for i := 0; i < servers; i++ {
-			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
+			_, _, ok, _ := cfg.rafts[i].Start(rand.Int() % 10000)
 			if ok && cfg.connected[i] {
 				leader = i
 			}
@@ -830,7 +830,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 				rf := cfg.rafts[i]
 				cfg.mu.Unlock()
 				if rf != nil {
-					index1, _, ok1 := rf.Start(x)
+					index1, _, ok1, _ := rf.Start(x)
 					if ok1 {
 						ok = ok1
 						index = index1

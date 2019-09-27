@@ -84,6 +84,7 @@ type Raft struct {
 
 	debug bool
 	//role state
+	leader              int
 	role                RaftRole
 	ctx                 context.Context
 	cancel              func()
@@ -107,13 +108,14 @@ type Raft struct {
 
 // return currentTerm and whether this server
 // believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
+func (rf *Raft) GetState() (int, bool, int) {
 	var term int
 	var role RaftRole
+	var leader int
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	term, role = rf.getState()
-	return term, role == RaftLeader
+	term, role, leader = rf.currentTerm, rf.role, rf.leader
+	return term, role == RaftLeader, leader
 }
 
 func (rf *Raft) apply(applyChan chan ApplyMsg) {
@@ -121,7 +123,7 @@ func (rf *Raft) apply(applyChan chan ApplyMsg) {
 	lastApplied := rf.lastApplied + 1
 	rf.mu.Lock()
 	if rf.lastApplied < rf.commitIndex {
-		entries = append(entries, rf.logs[rf.lastApplied + 1:rf.commitIndex+1]...)
+		entries = append(entries, rf.logs[rf.lastApplied+1:rf.commitIndex+1]...)
 	}
 	rf.lastApplied = rf.commitIndex
 	rf.mu.Unlock()
@@ -130,11 +132,6 @@ func (rf *Raft) apply(applyChan chan ApplyMsg) {
 		//RaftDebug("server", rf.me, "apply", ApplyMsg{true, command, rf.lastApplied})
 		applyChan <- ApplyMsg{true, entry.Command, lastApplied + i}
 	}
-}
-
-//must be inside critical region
-func (rf *Raft) getState() (int, RaftRole) {
-	return rf.currentTerm, rf.role
 }
 
 //must be inside critical region
@@ -345,7 +342,7 @@ func (rf *Raft) sendRequestVote() {
 			go func(server int) {
 				rf.mu.Lock()
 				lastIndex, lastTerm := rf.lastLogEntryInfo()
-				term, role := rf.getState()
+				term, role := rf.currentTerm, rf.role
 				rf.mu.Unlock()
 				if role == RaftCandidate {
 					args := RequestVoteArgs{
@@ -369,7 +366,7 @@ func (rf *Raft) sendRequestVote() {
 func (rf *Raft) sendOneAppendEntries(server int) bool {
 	var entries []RaftLogEntry
 	rf.mu.Lock()
-	term, role := rf.getState()
+	term, role := rf.currentTerm, rf.role
 	lastIndex, lastTerm, commitIndex := rf.lastFollowerEntryInfo(server)
 	if len(rf.logs)-1 > lastIndex {
 		entries = append(entries, rf.logs[lastIndex+1:]...)
@@ -431,17 +428,18 @@ func (rf *Raft) start(entry RaftLogEntry) int {
 	return index
 }
 
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
+func (rf *Raft) Start(command interface{}) (int, int, bool, int) {
 	index := -1
 	term := -1
 	isLeader := true
+	leader := -1
 	// Your code here (2B).
-	if term, isLeader = rf.GetState(); !isLeader {
-		return index, term, isLeader
+	if term, isLeader, leader = rf.GetState(); !isLeader {
+		return index, term, isLeader, leader
 	}
 	index = rf.start(RaftLogEntry{command, term})
 
-	return index, term, isLeader
+	return index, term, isLeader, rf.me
 }
 
 //
@@ -545,7 +543,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 			rf.commitIndex = req.args.LeaderCommit
 		}
 	}
-
+	rf.leader = req.args.LeaderId
 	req.reply.Success = true
 
 }
@@ -852,6 +850,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.leader = -1
 	rf.role = RaftFollower
 	rf.voteReqCh = make(chan *requestVoteReq, len(rf.peers))
 	rf.appendEntriesReqCh = make(chan *appendEntriesReq, len(rf.peers))
