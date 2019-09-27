@@ -533,7 +533,12 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	//check conflict
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "can update entries")
 	if req.args.PrevLogIndex < len(rf.logs)-1 {
-		rf.logs = append(rf.logs[:req.args.PrevLogIndex+1], req.args.Entries...)
+		for i, e := range req.args.Entries {
+			if rf.logs[req.args.PrevLogIndex+1+i].Term != e.Term || req.args.PrevLogIndex+1+i == len(rf.logs)-1 {
+				rf.logs = append(rf.logs[:req.args.PrevLogIndex+1+i], req.args.Entries[i:]...)
+				break
+			}
+		}
 	} else {
 		//rf.logs all committed
 		rf.logs = append(rf.logs, req.args.Entries...)
@@ -583,7 +588,7 @@ func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 	if rf.currentTerm < term {
 		rf.votedFor = -1
 		rf.currentTerm = term
-		if rf.backToFollowerCh != nil && rf.role == RaftLeader{
+		if rf.backToFollowerCh != nil && rf.role == RaftLeader {
 			rf.backToFollowerCh <- struct{}{}
 		}
 		rf.role = RaftFollower
@@ -598,10 +603,10 @@ func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 func (rf *Raft) updateCommitIndex(index int) {
 	count := 1
 	for _, m := range rf.matchedIndex {
-		if m >= index && rf.logs[index].Term == rf.currentTerm {
+		if m >= index {
 			count++
 		}
-		if count > len(rf.peers)/2 {
+		if count > len(rf.peers)/2 && rf.logs[index].Term == rf.currentTerm {
 			rf.commitIndex = index
 			//println("server", rf.me, "update commitIndex as leader ", rf.commitIndex)
 			return
