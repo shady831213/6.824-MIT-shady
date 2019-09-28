@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -43,6 +43,7 @@ type KVCommit struct {
 	Leader      int
 	Err         Err
 	op          *Op
+	RFIndex     int
 	done        chan struct{}
 }
 
@@ -59,9 +60,7 @@ type KVServer struct {
 	clerkTrack map[int64]int
 	ctx        context.Context
 	cancel     func()
-	//commit         chan KVCommit
 	pendingRPC     []*KVCommit
-	backToFollower chan struct{}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -75,7 +74,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	//	return
 	//}
 	op := Op{GET, kv.me, args.ClerkId, args.SeqId, args.Key, ""}
-	_, _, isLeader, leader := kv.rf.Start(op)
+	index, _, isLeader, leader := kv.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
 		reply.Leader = leader
@@ -88,6 +87,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.me,
 		"",
 		&op,
+		index,
 		make(chan struct{}),
 	}
 	kv.pendingRPC = append(kv.pendingRPC, &commit)
@@ -98,7 +98,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	reply.WrongLeader = commit.WrongLeader
 	reply.Leader = commit.Leader
 	reply.Value = commit.op.Value
-	//kv.clerkTrack[commit.op.ClerkId] = commit.op.SeqId
 	DPrintf("reply Get me: %d %+v %+v", kv.me, args, reply)
 
 }
@@ -115,7 +114,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	op := Op{(OPCode)(args.Op), kv.me, args.ClerkId, args.SeqId, args.Key, args.Value}
-	_, _, isLeader, leader := kv.rf.Start(op)
+	index, _, isLeader, leader := kv.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
 		reply.Leader = leader
@@ -128,6 +127,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.me,
 		"",
 		&op,
+		index,
 		make(chan struct{}),
 	}
 	kv.pendingRPC = append(kv.pendingRPC, &commit)
@@ -167,20 +167,6 @@ func (kv *KVServer) execute(op *Op) Err {
 func (kv *KVServer) applyMap() {
 	for {
 		select {
-		case <-kv.backToFollower:
-			kv.mu.Lock()
-			for len(kv.pendingRPC) != 0 {
-				//kv.clerkTrack[kv.pendingRPC[0].op.ClerkId] = kv.pendingRPC[0].op.SeqId
-				kv.pendingRPC[0].WrongLeader = true
-				kv.pendingRPC[0].Leader = -1
-				kv.pendingRPC[0].Err = OK
-				kv.pendingRPC[0].done <- struct{}{}
-				DPrintf("back to follower me: %d %+v", kv.me, kv.pendingRPC[0])
-
-				kv.pendingRPC = kv.pendingRPC[1:]
-			}
-			kv.mu.Unlock()
-			break
 		case apply := <-kv.applyCh:
 			if apply.CommandValid {
 				op, _ := (apply.Command).(Op)
@@ -188,9 +174,9 @@ func (kv *KVServer) applyMap() {
 				kv.mu.Lock()
 				kv.clerkTrack[op.ClerkId] = op.SeqId
 				DPrintf("server%d apply %+v Index:%d", kv.me, op, apply.CommandIndex)
-				if len(kv.pendingRPC) != 0 && op.SeqId == kv.pendingRPC[0].op.SeqId && op.ClerkId == kv.pendingRPC[0].op.ClerkId {
+				if len(kv.pendingRPC) != 0 && apply.CommandIndex == kv.pendingRPC[0].RFIndex {
 					DPrintf("commit me: %d %+v %+v Index:%d", kv.me, op, kv.pendingRPC[0], apply.CommandIndex)
-					kv.pendingRPC[0].WrongLeader = false
+					kv.pendingRPC[0].WrongLeader = op.SeqId != kv.pendingRPC[0].op.SeqId || op.ClerkId != kv.pendingRPC[0].op.ClerkId
 					kv.pendingRPC[0].Leader = op.ServerId
 					kv.pendingRPC[0].Err = err
 					kv.pendingRPC[0].op = &op
@@ -249,8 +235,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.backToFollower = make(chan struct{})
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh, kv.backToFollower)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	go kv.applyMap()

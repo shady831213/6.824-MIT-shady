@@ -91,7 +91,6 @@ type Raft struct {
 	appendEntriesReqCh  chan *appendEntriesReq
 	voteRespCh          chan *requestVoteResp
 	appendEntriesRespCh chan *appendEntriesResp
-	backToFollowerCh    chan struct{}
 	// persistent states
 	currentTerm int
 	votedFor    int
@@ -587,10 +586,6 @@ func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 	rf.mu.Lock()
 	if rf.currentTerm < term {
 		rf.votedFor = -1
-		if rf.backToFollowerCh != nil && rf.role == RaftLeader {
-			println("server", rf.me, "from", rf.role, "to", RaftFollower, "new term", term, "currentTerm", rf.currentTerm)
-			rf.backToFollowerCh <- struct{}{}
-		}
 		rf.currentTerm = term
 		rf.role = RaftFollower
 		update = true
@@ -796,23 +791,23 @@ func (rf *Raft) leaderState() {
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
 			return rf.backToFollower(req.args.Term, func() {
-				println("server", rf.me, "get vote req from", req.args.CandidateId, "term", req.args.Term)
+				//println("server", rf.me, "get vote req from", req.args.CandidateId, "term", req.args.Term)
 				rf.requestVote(req)
 			})
 		},
 		requestVoteRespAction: func(resp *requestVoteResp) bool {
-			println("server", rf.me, "get vote resp term", resp.reply.Term)
+			//println("server", rf.me, "get vote resp term", resp.reply.Term)
 			return rf.backToFollower(resp.reply.Term)
 		},
 		appendEntriesReqAction: func(req *appendEntriesReq) bool {
 			return rf.backToFollower(req.args.Term, func() {
-				println("server", rf.me, "get append req from", req.args.LeaderId, "term", req.args.Term)
+				//println("server", rf.me, "get append req from", req.args.LeaderId, "term", req.args.Term)
 				rf.appendEntries(req)
 			})
 		},
 		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
 			if rf.backToFollower(resp.reply.Term) {
-				println("server", rf.me, "get append resp term", resp.reply.Term)
+				//println("server", rf.me, "get append resp term", resp.reply.Term)
 				return true
 			}
 			if resp.reply.Success {
@@ -868,15 +863,13 @@ func (rf *Raft) leaderState() {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg,
-	backToFollwer chan struct{}) *Raft {
+	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.backToFollowerCh = backToFollwer
 	rf.leader = -1
 	rf.role = RaftFollower
 	rf.voteReqCh = make(chan *requestVoteReq, len(rf.peers))
