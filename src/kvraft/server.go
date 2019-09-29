@@ -26,6 +26,15 @@ const (
 	APPEND = "Append"
 )
 
+type ClerkTrackAction int
+
+const (
+	_ ClerkTrackAction = iota
+	ClerkOK
+	ClerkIgnore
+	ClerkRetry
+)
+
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
@@ -83,11 +92,35 @@ func (kv *KVServer) serveRPC(opcode OPCode, args interface{}, reply interface{})
 	<-req.done
 }
 
+func (kv *KVServer) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	v, ok := kv.clerkTrack[clerkId]
+	//when restart
+	if !ok && sedId > 0 || sedId > v+1 {
+		return ClerkRetry
+	}
+	if !ok && sedId == 0 || sedId == v+1 {
+		return ClerkOK
+	}
+	return ClerkIgnore
+}
+
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.serveRPC(GET, args, reply)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	switch kv.checkClerkTrack(args.ClerkId, args.SeqId) {
+	case ClerkIgnore:
+		DPrintf("ignore PutAppend me: %d %+v %+v", kv.me, args, reply)
+		return
+	case ClerkRetry:
+		reply.WrongLeader = true
+		reply.Leader = -1
+		DPrintf("retry PutAppend me: %d %+v %+v", kv.me, args, reply)
+		return
+	}
 	kv.serveRPC((OPCode)(args.Op), args, reply)
 }
 
@@ -109,23 +142,12 @@ func (kv *KVServer) waitingCommit(op *Op, index int) KVRPCResp {
 	return commit
 }
 
-func (kv *KVServer) checkClerkTrack(clerkId int64, sedId int) bool {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	v, ok := kv.clerkTrack[clerkId]
-	return !ok || sedId > v
-}
-
 func (kv *KVServer) handleRPC(req *KVRPCReq) {
 	switch req.OpCode {
 	case GET:
 		args, reply := req.args.(*GetArgs), req.reply.(*GetReply)
 		reply.Server = kv.me
 		DPrintf("get Get me: %d %+v %+v", kv.me, args, reply)
-		//if seqId, ok := kv.clerkTrack[args.ClerkId]; ok && args.SeqId <= seqId {
-		//	DPrintf("ignore Get me: %d %+v %+v seqID:%d", kv.me, args, reply,seqId)
-		//	return
-		//}
 		op := Op{GET, kv.me, args.ClerkId, args.SeqId, args.Key, ""}
 		index, _, isLeader, leader := kv.rf.Start(op)
 		if !isLeader {
@@ -145,10 +167,6 @@ func (kv *KVServer) handleRPC(req *KVRPCReq) {
 		args, reply := req.args.(*PutAppendArgs), req.reply.(*PutAppendReply)
 		reply.Server = kv.me
 		DPrintf("get PutAppend me: %d %+v %+v", kv.me, args, reply)
-		if !kv.checkClerkTrack(args.ClerkId, args.SeqId) {
-			DPrintf("ignore PutAppend me: %d %+v %+v", kv.me, args, reply)
-			return
-		}
 		op := Op{(OPCode)(args.Op), kv.me, args.ClerkId, args.SeqId, args.Key, args.Value}
 		index, _, isLeader, leader := kv.rf.Start(op)
 		if !isLeader {
