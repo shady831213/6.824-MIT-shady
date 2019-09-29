@@ -55,7 +55,7 @@ const (
 	RaftStop
 )
 
-const RaftHeartBeatPeriod = 20 * time.Millisecond
+const RaftHeartBeatPeriod = 50 * time.Millisecond
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -67,6 +67,8 @@ type RaftLogEntry struct {
 	Command interface{}
 	Term    int
 }
+
+const DummyRaftCommand = "DummyRaftCommand"
 
 //
 // A Go object implementing a single Raft peer.
@@ -81,7 +83,8 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	debug bool
+	debug      bool
+	dummyCmdEn bool
 	//role state
 	leader              int
 	role                RaftRole
@@ -132,7 +135,7 @@ func (rf *Raft) apply(applyChan chan ApplyMsg) {
 	for i, entry := range entries {
 		//RaftDebug("server", rf.me, "applyIndex", rf.lastApplied, "commitIndex", rf.commitIndex, "log", rf.logs)
 		//RaftDebug("server", rf.me, "apply", ApplyMsg{true, command, rf.lastApplied})
-		applyChan <- ApplyMsg{true, entry.Command, lastApplied + i}
+		applyChan <- ApplyMsg{entry.Command != DummyRaftCommand, entry.Command, lastApplied + i}
 	}
 }
 
@@ -563,7 +566,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 }
 
 func (rf *Raft) getElectionTimeout() time.Duration {
-	return time.Duration(rand.Int()%100+200) * RaftHeartBeatPeriod
+	return time.Duration(rand.Int()%10+2) * RaftHeartBeatPeriod
 }
 
 func (rf *Raft) doActions(actions ...func()) {
@@ -602,7 +605,9 @@ func (rf *Raft) updateCommitIndex(index int) {
 		if m >= index {
 			count++
 		}
-		if count > len(rf.peers)/2 && rf.logs[index].Term == rf.currentTerm {
+		//println("server", rf.me, "update commitIndex as leader ", index, count, fmt.Sprintf("%+v", rf.matchedIndex))
+		//Figure8, section 5.4.2
+		if count > len(rf.peers)/2 && rf.logs[index].Term == rf.currentTerm || count == len(rf.peers)-1 {
 			rf.commitIndex = index
 			//println("server", rf.me, "update commitIndex as leader ", rf.commitIndex)
 			return
@@ -772,11 +777,16 @@ func (rf *Raft) candidateState() {
 
 func (rf *Raft) leaderState() {
 	rf.mu.Lock()
+	//for Figure 8 may cause deadlock when entry leader, and it's discribed in section 8
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = len(rf.logs)
 	}
 	rf.matchedIndex = make([]int, len(rf.peers))
+	if rf.dummyCmdEn {
+		rf.logs = append(rf.logs, RaftLogEntry{DummyRaftCommand, rf.currentTerm})
+		rf.persist()
+	}
 	rf.mu.Unlock()
 	rf.sendAppendEntries()
 
@@ -815,8 +825,7 @@ func (rf *Raft) leaderState() {
 					matchedIndex := resp.args.PrevLogIndex + len(resp.args.Entries)
 					rf.nextIndex[resp.server] = matchedIndex + 1
 					rf.matchedIndex[resp.server] = matchedIndex
-					//for Figure 8
-					if matchedIndex > rf.commitIndex /*&& resp.args.PrevLogTerm == rf.currentTerm*/ {
+					if matchedIndex > rf.commitIndex {
 						rf.updateCommitIndex(matchedIndex)
 					}
 					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.matchedIndex[resp.server])
@@ -863,7 +872,7 @@ func (rf *Raft) leaderState() {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg, dummyCmdEn bool) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -871,6 +880,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.leader = -1
+	rf.dummyCmdEn = dummyCmdEn
 	rf.role = RaftFollower
 	rf.voteReqCh = make(chan *requestVoteReq, len(rf.peers))
 	rf.appendEntriesReqCh = make(chan *appendEntriesReq, len(rf.peers))

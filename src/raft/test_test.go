@@ -436,7 +436,7 @@ func TestCount2B(t *testing.T) {
 
 	total1 := rpcs()
 
-	if total1 > 100 || total1 < 1 {
+	if total1 > 30 || total1 < 1 {
 		t.Fatalf("too many or few RPCs (%v) to elect initial leader\n", total1)
 	}
 
@@ -521,7 +521,7 @@ loop:
 		total3 += cfg.rpcCount(j)
 	}
 
-	if total3-total2 > 3*100 {
+	if total3-total2 > 3*20 {
 		t.Fatalf("too many RPCs (%v) for 1 second of idleness\n", total3-total2)
 	}
 
