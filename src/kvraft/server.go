@@ -38,12 +38,19 @@ type Op struct {
 	Value    string
 }
 
-type KVCommit struct {
-	WrongLeader bool
-	Leader      int
-	Err         Err
+type KVRPCReq struct {
+	OpCode OPCode
+	args   interface{}
+	reply  interface{}
+	done   chan struct{}
+}
+
+type KVRPCResp struct {
+	wrongLeader bool
+	leader      int
+	err         Err
 	op          *Op
-	RFIndex     int
+	rfIndex     int
 	done        chan struct{}
 }
 
@@ -60,84 +67,110 @@ type KVServer struct {
 	clerkTrack map[int64]int
 	ctx        context.Context
 	cancel     func()
-	pendingRPC     []*KVCommit
+	rpc        chan KVRPCReq
+	pending    *KVRPCResp
+}
+
+func (kv *KVServer) serveRPC(opcode OPCode, args interface{}, reply interface{}) {
+	req := KVRPCReq{
+		opcode,
+		args,
+		reply,
+		make(chan struct{}),
+	}
+	kv.rpc <- req
+	<-req.done
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-	DPrintf("get Get before lock me: %d %+v %+v", kv.me, args, reply)
-	kv.mu.Lock()
-	reply.Server = kv.me
-	DPrintf("get Get me: %d %+v %+v seqId: %d", kv.me, args, reply, kv.clerkTrack[args.ClerkId])
-	//if seqId, ok := kv.clerkTrack[args.ClerkId]; ok && args.SeqId <= seqId {
-	//	DPrintf("ignore Get me: %d %+v %+v seqID:%d", kv.me, args, reply,seqId)
-	//	return
-	//}
-	op := Op{GET, kv.me, args.ClerkId, args.SeqId, args.Key, ""}
-	index, _, isLeader, leader := kv.rf.Start(op)
-	if !isLeader {
-		reply.WrongLeader = true
-		reply.Leader = leader
-		DPrintf("NotLeader Get me: %d %+v %+v", kv.me, args, reply)
-		kv.mu.Unlock()
-		return
-	}
-	commit := KVCommit{
-		true,
-		kv.me,
-		"",
-		&op,
-		index,
-		make(chan struct{}),
-	}
-	kv.pendingRPC = append(kv.pendingRPC, &commit)
-	kv.mu.Unlock()
-	DPrintf("Waiting Get commit me: %d %+v %+v", kv.me, args, reply)
-	<-commit.done
-	reply.Err = commit.Err
-	reply.WrongLeader = commit.WrongLeader
-	reply.Leader = commit.Leader
-	reply.Value = commit.op.Value
-	DPrintf("reply Get me: %d %+v %+v", kv.me, args, reply)
-
+	kv.serveRPC(GET, args, reply)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
-	DPrintf("get PutAppend before lock me: %d %+v %+v", kv.me, args, reply)
-	kv.mu.Lock()
-	reply.Server = kv.me
-	DPrintf("get PutAppend me: %d %+v %+v seqId: %d", kv.me, args, reply, kv.clerkTrack[args.ClerkId])
-	if seqId, ok := kv.clerkTrack[args.ClerkId]; ok && args.SeqId <= seqId {
-		DPrintf("ignore PutAppend me: %d %+v %+v seqId:%d", kv.me, args, reply, seqId)
-		kv.mu.Unlock()
-		return
-	}
-	op := Op{(OPCode)(args.Op), kv.me, args.ClerkId, args.SeqId, args.Key, args.Value}
-	index, _, isLeader, leader := kv.rf.Start(op)
-	if !isLeader {
-		reply.WrongLeader = true
-		reply.Leader = leader
-		DPrintf("NotLeader PutAppend me: %d %+v %+v", kv.me, args, reply)
-		kv.mu.Unlock()
-		return
-	}
-	commit := KVCommit{
+	kv.serveRPC((OPCode)(args.Op), args, reply)
+}
+
+func (kv *KVServer) waitingCommit(op *Op, index int) KVRPCResp {
+	commit := KVRPCResp{
 		true,
 		kv.me,
 		"",
-		&op,
+		op,
 		index,
 		make(chan struct{}),
 	}
-	kv.pendingRPC = append(kv.pendingRPC, &commit)
+	kv.mu.Lock()
+	kv.pending = &commit
 	kv.mu.Unlock()
-	DPrintf("Waiting PutAppend commit me: %d %+v %+v", kv.me, args, reply)
+	DPrintf("Waiting %s commitProcess me: %d %+v", op.OpCode, kv.me, op)
 	<-commit.done
-	reply.Err = commit.Err
-	reply.WrongLeader = commit.WrongLeader
-	reply.Leader = commit.Leader
-	DPrintf("reply PutAppend me: %d %+v %+v", kv.me, args, reply)
+	return commit
+}
+
+func (kv *KVServer) handleRPC(req *KVRPCReq) {
+	switch req.OpCode {
+	case GET:
+		args, reply := req.args.(*GetArgs), req.reply.(*GetReply)
+		reply.Server = kv.me
+		DPrintf("get Get me: %d %+v %+v", kv.me, args, reply)
+		//if seqId, ok := kv.clerkTrack[args.ClerkId]; ok && args.SeqId <= seqId {
+		//	DPrintf("ignore Get me: %d %+v %+v seqID:%d", kv.me, args, reply,seqId)
+		//	return
+		//}
+		op := Op{GET, kv.me, args.ClerkId, args.SeqId, args.Key, ""}
+		index, _, isLeader, leader := kv.rf.Start(op)
+		if !isLeader {
+			reply.WrongLeader = true
+			reply.Leader = leader
+			DPrintf("NotLeader Get me: %d %+v %+v", kv.me, args, reply)
+			return
+		}
+		commit := kv.waitingCommit(&op, index)
+		reply.Err = commit.err
+		reply.WrongLeader = commit.wrongLeader
+		reply.Leader = commit.leader
+		reply.Value = commit.op.Value
+		DPrintf("reply Get me: %d %+v %+v", kv.me, args, reply)
+		break
+	case PUT, APPEND:
+		args, reply := req.args.(*PutAppendArgs), req.reply.(*PutAppendReply)
+		reply.Server = kv.me
+		kv.mu.Lock()
+		DPrintf("get PutAppend me: %d %+v %+v seqId: %d", kv.me, args, reply, kv.clerkTrack[args.ClerkId])
+		if seqId, ok := kv.clerkTrack[args.ClerkId]; ok && args.SeqId <= seqId {
+			DPrintf("ignore PutAppend me: %d %+v %+v seqId:%d", kv.me, args, reply, seqId)
+			kv.mu.Unlock()
+			return
+		}
+		kv.mu.Unlock()
+		op := Op{(OPCode)(args.Op), kv.me, args.ClerkId, args.SeqId, args.Key, args.Value}
+		index, _, isLeader, leader := kv.rf.Start(op)
+		if !isLeader {
+			reply.WrongLeader = true
+			reply.Leader = leader
+			DPrintf("NotLeader PutAppend me: %d %+v %+v", kv.me, args, reply)
+			return
+		}
+		commit := kv.waitingCommit(&op, index)
+		reply.Err = commit.err
+		reply.WrongLeader = commit.wrongLeader
+		reply.Leader = commit.leader
+		DPrintf("reply PutAppend me: %d %+v %+v", kv.me, args, reply)
+		break
+	}
+}
+
+func (kv *KVServer) rpcProcess() {
+	for {
+		select {
+		case rpc := <-kv.rpc:
+			kv.handleRPC(&rpc)
+			rpc.done <- struct{}{}
+			break
+		case <-kv.ctx.Done():
+			return
+		}
+	}
 }
 
 func (kv *KVServer) execute(op *Op) Err {
@@ -164,29 +197,39 @@ func (kv *KVServer) execute(op *Op) Err {
 	return OK
 }
 
-func (kv *KVServer) applyMap() {
+func (kv *KVServer) servePendingRPC(op *Op, index int, err Err) {
+	kv.mu.Lock()
+	kv.clerkTrack[op.ClerkId] = op.SeqId
+	if kv.pending != nil && index == kv.pending.rfIndex {
+		DPrintf("commitProcess me: %d %+v %+v Index:%d", kv.me, op, kv.pending, index)
+		kv.pending.wrongLeader = op.SeqId != kv.pending.op.SeqId || op.ClerkId != kv.pending.op.ClerkId
+		kv.pending.leader = op.ServerId
+		kv.pending.err = err
+		kv.pending.op = op
+		close(kv.pending.done)
+		kv.pending = nil
+	}
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) commitProcess() {
 	for {
 		select {
 		case apply := <-kv.applyCh:
 			if apply.CommandValid {
 				op, _ := (apply.Command).(Op)
 				err := kv.execute(&op)
-				kv.mu.Lock()
-				kv.clerkTrack[op.ClerkId] = op.SeqId
 				DPrintf("server%d apply %+v Index:%d", kv.me, op, apply.CommandIndex)
-				if len(kv.pendingRPC) != 0 && apply.CommandIndex == kv.pendingRPC[0].RFIndex {
-					DPrintf("commit me: %d %+v %+v Index:%d", kv.me, op, kv.pendingRPC[0], apply.CommandIndex)
-					kv.pendingRPC[0].WrongLeader = op.SeqId != kv.pendingRPC[0].op.SeqId || op.ClerkId != kv.pendingRPC[0].op.ClerkId
-					kv.pendingRPC[0].Leader = op.ServerId
-					kv.pendingRPC[0].Err = err
-					kv.pendingRPC[0].op = &op
-					kv.pendingRPC[0].done <- struct{}{}
-					kv.pendingRPC = kv.pendingRPC[1:]
-				}
-				kv.mu.Unlock()
+				kv.servePendingRPC(&op, apply.CommandIndex, err)
 			}
 			break
 		case <-kv.ctx.Done():
+			kv.mu.Lock()
+			if kv.pending != nil {
+				close(kv.pending.done)
+				kv.pending = nil
+			}
+			kv.mu.Unlock()
 			return
 		}
 	}
@@ -230,15 +273,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.db = make(map[string]string)
 	kv.clerkTrack = make(map[int64]int)
-	kv.pendingRPC = make([]*KVCommit, 0)
-	//kv.commit = make(chan KVCommit)
+	kv.rpc = make(chan KVRPCReq)
+	kv.pending = nil
+
+	//kv.commitProcess = make(chan KVRPCReq)
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	go kv.applyMap()
+	go kv.commitProcess()
+	go kv.rpcProcess()
 
 	return kv
 }
