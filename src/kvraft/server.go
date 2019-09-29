@@ -73,6 +73,7 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	booting    bool
 	db         map[string]string
 	clerkTrack map[int64]int
 	ctx        context.Context
@@ -92,35 +93,12 @@ func (kv *KVServer) serveRPC(opcode OPCode, args interface{}, reply interface{})
 	<-req.done
 }
 
-func (kv *KVServer) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	v, ok := kv.clerkTrack[clerkId]
-	//when restart
-	if !ok && sedId > 0 || sedId > v+1 {
-		return ClerkRetry
-	}
-	if !ok && sedId == 0 || sedId == v+1 {
-		return ClerkOK
-	}
-	return ClerkIgnore
-}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.serveRPC(GET, args, reply)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	switch kv.checkClerkTrack(args.ClerkId, args.SeqId) {
-	case ClerkIgnore:
-		DPrintf("ignore PutAppend me: %d %+v %+v", kv.me, args, reply)
-		return
-	case ClerkRetry:
-		reply.WrongLeader = true
-		reply.Leader = -1
-		DPrintf("retry PutAppend me: %d %+v %+v", kv.me, args, reply)
-		return
-	}
 	kv.serveRPC((OPCode)(args.Op), args, reply)
 }
 
@@ -140,6 +118,26 @@ func (kv *KVServer) waitingCommit(op *Op, index int) KVRPCResp {
 	DPrintf("Waiting %s commitProcess me: %d %+v index %d", op.OpCode, kv.me, op, index)
 	<-commit.done
 	return commit
+}
+
+
+func (kv *KVServer) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	v, ok := kv.clerkTrack[clerkId]
+	//when restart
+	if !ok && sedId > 0 || sedId > v+1 {
+		return ClerkRetry
+	}
+	//for restart corner case
+	if !ok && sedId == 0 || sedId == v+1 {
+		if kv.booting {
+			kv.booting = false
+			return ClerkRetry
+		}
+		return ClerkOK
+	}
+	return ClerkIgnore
 }
 
 func (kv *KVServer) handleRPC(req *KVRPCReq) {
@@ -166,6 +164,16 @@ func (kv *KVServer) handleRPC(req *KVRPCReq) {
 	case PUT, APPEND:
 		args, reply := req.args.(*PutAppendArgs), req.reply.(*PutAppendReply)
 		reply.Server = kv.me
+		switch kv.checkClerkTrack(args.ClerkId, args.SeqId) {
+		case ClerkIgnore:
+			DPrintf("ignore PutAppend me: %d %+v %+v", kv.me, args, reply)
+			return
+		case ClerkRetry:
+			reply.WrongLeader = true
+			reply.Leader = -1
+			DPrintf("retry PutAppend me: %d %+v %+v", kv.me, args, reply)
+			return
+		}
 		DPrintf("get PutAppend me: %d %+v %+v", kv.me, args, reply)
 		op := Op{(OPCode)(args.Op), kv.me, args.ClerkId, args.SeqId, args.Key, args.Value}
 		index, _, isLeader, leader := kv.rf.Start(op)
@@ -302,12 +310,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.booting = true
 	kv.db = make(map[string]string)
 	kv.clerkTrack = make(map[int64]int)
 	kv.rpc = make(chan KVRPCReq)
 	kv.pending = nil
-
-	//kv.commitProcess = make(chan KVRPCReq)
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
 
 	kv.applyCh = make(chan raft.ApplyMsg)
