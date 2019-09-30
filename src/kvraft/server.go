@@ -10,7 +10,7 @@ import (
 	"sync"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -314,7 +314,8 @@ func (kv *KVServer) commitProcess() {
 				}
 			} else {
 				kv.servePendingRPC(&apply, err, value)
-				if apply.LogIndex == kv.maxraftstate {
+				if apply.StageSize >= kv.maxraftstate {
+					DPrintf("make snapshot me: %d Index:%d stageSize %d", kv.me, apply.CommandIndex, apply.StageSize)
 					kv.rf.Snapshot(apply.CommandIndex, kv.encodeSnapshot())
 				}
 			}

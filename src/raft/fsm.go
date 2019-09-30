@@ -117,7 +117,13 @@ func (rf *Raft) sendOneInstallSnapshot(server int) {
 func (rf *Raft) sendAppendEntries() {
 	for i := range rf.peers {
 		if i != rf.me {
-			go rf.sendOneAppendEntries(i)
+			rf.mu.Lock()
+			if  rf.nextIndex[i] <= rf.snapshot.Index {
+				go rf.sendOneInstallSnapshot(i)
+			} else {
+				go rf.sendOneAppendEntries(i)
+			}
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -212,10 +218,15 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		req.reply.Success = false
 		req.reply.ConflictIndex = rf.snapshot.Index + 1
 		req.reply.ConflictTerm = -1
+		return
 	}
 	//when follower snapshoted and leader have not, because all snapshoted entry must be committed, no way term conflict in snapshot
 	if req.args.PrevLogIndex == rf.snapshot.Index && req.args.PrevLogTerm != rf.snapshot.Term {
-		panic(fmt.Sprint("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "conflict snapshot term", req.args.PrevLogTerm, rf.snapshot.Term))
+		fmt.Printf("append args: %+v\n", req.args)
+		println()
+		fmt.Printf("snapshot: %+v\n", rf.snapshot)
+		println()
+		panic(fmt.Sprint("server ", rf.me, " get appendEntries rpc from ", req.args.LeaderId, " PrevLogIndex ", req.args.PrevLogIndex, " conflict snapshot term ", req.args.PrevLogTerm, rf.snapshot.Term))
 	}
 
 	if req.args.PrevLogIndex > rf.snapshot.Index {
@@ -252,6 +263,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		rf.commitIndex = rf.logIndex(len(rf.logs) - 1)
 		if req.args.LeaderCommit < rf.commitIndex {
 			rf.commitIndex = req.args.LeaderCommit
+			go rf.applyEntries()
 		}
 	}
 	//println("server", rf.me, "update commitIndex as follower", rf.commitIndex, "log len =", len(rf.logs))
@@ -274,14 +286,20 @@ func (rf *Raft) installSnapshot(req *installSnapshotReq) {
 	}
 	RaftDebug("server", rf.me, "get installSnapshot rpc from", req.args.LeaderId, "LastIncludedIndex", req.args.LastIncludedIndex, "LastIncludedTerm", req.args.LastIncludedTerm)
 	if req.args.LastIncludedIndex > rf.snapshot.Index {
-		if rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term != req.args.LastIncludedTerm {
-			panic(fmt.Sprint("installSnapshot term conflict,", rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term, req.args.LastIncludedTerm))
-		}
-		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.Data)
-		go rf.applySnapshot(RaftSnapShot{req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data})
+		//if rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term != req.args.LastIncludedTerm {
+		//	panic(fmt.Sprint("installSnapshot term conflict,", rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term, req.args.LastIncludedTerm))
+		//}
+		println("server", rf.me, "make snapshot though installSnapshot rpc")
+		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
+		println("server", rf.me, "make snapshot though installSnapshot rpc")
+		go rf.applySnapshot()
 	}
 	if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
-		panic(fmt.Sprint("installSnapshot term conflict,", rf.snapshot.Term, req.args.LastIncludedTerm))
+		fmt.Printf("snapshot to be installed: %+v\n", req.args)
+		println()
+		fmt.Printf("snapshot: %+v\n", rf.snapshot)
+		println()
+		panic(fmt.Sprint("server ", rf.me, "installSnapshot term conflict from ", req.args.LeaderId, rf.snapshot.Term, req.args.LastIncludedTerm))
 	}
 	rf.leader = req.args.LeaderId
 
@@ -327,6 +345,7 @@ func (rf *Raft) updateCommitIndex(index int) {
 		//Figure8, section 5.4.2
 		if count > len(rf.peers)/2 && rf.logs[rf.logPosition(index)].Term == rf.currentTerm || count == len(rf.peers)-1 {
 			rf.commitIndex = index
+			go rf.applyEntries()
 			//println("server", rf.me, "update commitIndex as leader ", rf.commitIndex)
 			return
 		}
@@ -457,8 +476,10 @@ func (rf *Raft) followerState() {
 			return false
 		},
 		snapshotReqAction: func(req *snapshotReq) bool {
-			rf.makeSnapshot(req.index, req.data)
+			rf.mu.Lock()
+			rf.makeSnapshot(req.index, 0, req.data)
 			close(req.done)
+			rf.mu.Unlock()
 			return false
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
@@ -520,8 +541,10 @@ func (rf *Raft) candidateState() {
 			return false
 		},
 		snapshotReqAction: func(req *snapshotReq) bool {
-			rf.makeSnapshot(req.index, req.data)
+			rf.mu.Lock()
+			rf.makeSnapshot(req.index, 0, req.data)
 			close(req.done)
+			rf.mu.Unlock()
 			return false
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
@@ -605,8 +628,10 @@ func (rf *Raft) leaderState() {
 			return false
 		},
 		snapshotReqAction: func(req *snapshotReq) bool {
-			rf.makeSnapshot(req.index, req.data)
+			rf.mu.Lock()
+			rf.makeSnapshot(req.index, 0, req.data)
 			close(req.done)
+			rf.mu.Unlock()
 			return false
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
@@ -659,6 +684,10 @@ func (rf *Raft) leaderState() {
 							conflictIndex = i + 1
 							break
 						}
+						if rf.logPosition(i) == 0 {
+							conflictIndex = rf.snapshot.Index
+							break
+						}
 					}
 					rf.nextIndex[resp.server] = conflictIndex
 				}
@@ -673,18 +702,17 @@ func (rf *Raft) leaderState() {
 			return false
 		},
 		installSnapshotReqAction: func(req *installSnapshotReq) bool {
-			return rf.backToFollower(req.args.Term, func() {
-				//println("server", rf.me, "get append req from", req.args.LeaderId, "term", req.args.Term)
-				rf.installSnapshot(req)
-			})
+			return rf.backToFollower(req.args.Term)
 		},
 		installSnapshotRespAction: func(resp *installSnapshotResp) bool {
 			if rf.backToFollower(resp.reply.Term) {
 				//println("server", rf.me, "get append resp term", resp.reply.Term)
 				return true
 			}
-			rf.nextIndex[resp.server] = rf.snapshot.Index + 1
-			go rf.sendOneAppendEntries(resp.server)
+			rf.setRole(RaftLeader, func() {
+				rf.nextIndex[resp.server] = rf.snapshot.Index + 1
+				go rf.sendOneAppendEntries(resp.server)
+			})
 			return false
 		},
 	})

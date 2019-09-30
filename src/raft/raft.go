@@ -62,7 +62,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-	LogIndex     int
+	StageSize    int
 	Snapshot     bool
 }
 
@@ -124,7 +124,7 @@ type Raft struct {
 
 func (rf *Raft) logPosition(i int) int {
 	if i < rf.snapshot.Index {
-		panic(fmt.Sprint(i, "< snapshot index", rf.snapshot.Index))
+		panic(fmt.Sprint("server ", rf.me, ":", i, " < snapshot index ", rf.snapshot.Index))
 	}
 	return i - rf.snapshot.Index
 }
@@ -143,8 +143,13 @@ func (rf *Raft) lastLogEntryInfo() (int, int) {
 //must be inside critical region
 func (rf *Raft) lastFollowerEntryInfo(follower int) (int, int, int) {
 	index := rf.nextIndex[follower] - 1
-	RaftDebug("server", rf.me, "matchedIndex of follower", follower, rf.logPosition(index), rf.nextIndex[follower])
-	return rf.logPosition(index), rf.logs[rf.logPosition(index)].Term, rf.commitIndex
+	//RaftDebug("server", rf.me, "matchedIndex of follower", follower, rf.logPosition(index), rf.nextIndex[follower])
+	println("server", rf.me, "matchedIndex of follower", follower, rf.nextIndex[follower])
+	term := rf.logs[rf.logPosition(index)].Term
+	if index == rf.snapshot.Index {
+		term = rf.snapshot.Term
+	}
+	return index, term, rf.commitIndex
 }
 
 //
@@ -251,16 +256,21 @@ func (rf *Raft) readSnapshot(data []byte) {
 	}
 }
 
-func (rf *Raft) makeSnapshot(index int, snapshotData []byte) {
-	rf.snapshot.Index = index
-	rf.snapshot.Term = rf.logs[rf.logPosition(index)].Term
-	rf.snapshot.Data = append(rf.snapshot.Data, snapshotData...)
-	if rf.logPosition(index) < len(rf.logs) {
-		rf.logs = rf.logs[rf.logPosition(index+1):]
-	} else {
-		rf.logs = make([]RaftLogEntry, 0)
+func (rf *Raft) makeSnapshot(index int, term int, snapshotData []byte) {
+	if index <= rf.snapshot.Index {
+		return
 	}
+	if rf.logPosition(index) < len(rf.logs) {
+		rf.snapshot.Term = rf.logs[rf.logPosition(index)].Term
+		rf.logs = append([]RaftLogEntry{{0, 0}}, rf.logs[rf.logPosition(index+1):]...)
+	} else {
+		rf.snapshot.Term = term
+		rf.logs = []RaftLogEntry{{0, 0}}
+	}
+	rf.snapshot.Data = append(rf.snapshot.Data, snapshotData...)
+	rf.snapshot.Index = index
 	rf.persist()
+	println("server", rf.me, "make snapshot", fmt.Sprintf("+%v", rf.snapshot))
 }
 
 func (rf *Raft) getElectionTimeout() time.Duration {
@@ -278,16 +288,25 @@ func (rf *Raft) applyEntries() {
 		//println()
 	}
 	rf.lastApplied = rf.commitIndex
-	logPositionLastApplied := rf.logPosition(lastApplied)
+
 	rf.mu.Unlock()
 	for i, entry := range entries {
 		//RaftDebug("server", rf.me, "applyIndex", rf.lastApplied, "commitIndex", rf.commitIndex, "log", rf.logs)
 		//RaftDebug("server", rf.me, "applyEntries", ApplyMsg{true, command, rf.lastApplied})
-		rf.applyCh <- ApplyMsg{entry.Command != DummyRaftCommand, entry.Command, lastApplied + i, logPositionLastApplied + i, false}
+		rf.mu.Lock()
+		stageSize := rf.persister.RaftStateSize()
+		rf.mu.Unlock()
+		rf.applyCh <- ApplyMsg{entry.Command != DummyRaftCommand, entry.Command, lastApplied + i, stageSize, false}
 	}
 }
 
-func (rf *Raft) applySnapshot(snapshot RaftSnapShot) {
+func (rf *Raft) applySnapshot() {
+	rf.mu.Lock()
+	snapshot := rf.snapshot
+	if rf.lastApplied < rf.snapshot.Index {
+		rf.lastApplied = rf.snapshot.Index
+	}
+	rf.mu.Unlock()
 	rf.applyCh <- ApplyMsg{false, snapshot.Data, snapshot.Index, 0, true}
 }
 
@@ -336,22 +355,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
 	if rf.snapshot.Index != 0 {
-		go rf.applySnapshot(rf.snapshot)
+		go rf.applySnapshot()
 	}
 	rf.ctx, rf.cancel = context.WithCancel(context.Background())
 
 	go rf.fsm()
-	go func() {
-		for {
-			select {
-			case <-rf.ctx.Done():
-				return
-			case <-time.After(RaftHeartBeatPeriod):
-				rf.applyEntries()
-				break
-			}
-		}
-	}()
+	//go func() {
+	//	for {
+	//		select {
+	//		case <-rf.ctx.Done():
+	//			return
+	//		case <-time.After(RaftHeartBeatPeriod):
+	//			rf.applyEntries()
+	//			break
+	//		}
+	//	}
+	//}()
 	return rf
 }
 
