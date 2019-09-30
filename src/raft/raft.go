@@ -62,6 +62,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	LogIndex     int
 	Snapshot     bool
 }
 
@@ -254,7 +255,11 @@ func (rf *Raft) makeSnapshot(index int, snapshotData []byte) {
 	rf.snapshot.Index = index
 	rf.snapshot.Term = rf.logs[rf.logPosition(index)].Term
 	rf.snapshot.Data = append(rf.snapshot.Data, snapshotData...)
-	rf.logs = rf.logs[rf.logPosition(index+1):]
+	if rf.logPosition(index) < len(rf.logs) {
+		rf.logs = rf.logs[rf.logPosition(index+1):]
+	} else {
+		rf.logs = make([]RaftLogEntry, 0)
+	}
 	rf.persist()
 }
 
@@ -273,16 +278,17 @@ func (rf *Raft) applyEntries() {
 		//println()
 	}
 	rf.lastApplied = rf.commitIndex
+	logPositionLastApplied := rf.logPosition(lastApplied)
 	rf.mu.Unlock()
 	for i, entry := range entries {
 		//RaftDebug("server", rf.me, "applyIndex", rf.lastApplied, "commitIndex", rf.commitIndex, "log", rf.logs)
 		//RaftDebug("server", rf.me, "applyEntries", ApplyMsg{true, command, rf.lastApplied})
-		rf.applyCh <- ApplyMsg{entry.Command != DummyRaftCommand, entry.Command, lastApplied + i, false}
+		rf.applyCh <- ApplyMsg{entry.Command != DummyRaftCommand, entry.Command, lastApplied + i, logPositionLastApplied + i, false}
 	}
 }
 
 func (rf *Raft) applySnapshot(snapshot RaftSnapShot) {
-	rf.applyCh <- ApplyMsg{false, snapshot.Data, snapshot.Index, true}
+	rf.applyCh <- ApplyMsg{false, snapshot.Data, snapshot.Index, 0, true}
 }
 
 //
@@ -329,7 +335,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
-
+	if rf.snapshot.Index != 0 {
+		go rf.applySnapshot(rf.snapshot)
+	}
 	rf.ctx, rf.cancel = context.WithCancel(context.Background())
 
 	go rf.fsm()

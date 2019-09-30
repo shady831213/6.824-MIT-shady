@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"context"
 	"labgob"
 	"labrpc"
@@ -91,8 +92,8 @@ type KVServer struct {
 
 	// Your definitions here.
 	booting    bool
-	db         map[string]string
-	clerkTrack map[int64]int
+	DB         map[string]string
+	ClerkTrack map[int64]int
 	ctx        context.Context
 	cancel     func()
 	issueing   chan KVRPCIssueItem
@@ -129,7 +130,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	v, ok := kv.clerkTrack[clerkId]
+	v, ok := kv.ClerkTrack[clerkId]
 	//when restart
 	if !ok && sedId > 0 || sedId > v+1 {
 		return ClerkRetry
@@ -218,20 +219,20 @@ func (kv *KVServer) issueProcess() {
 func (kv *KVServer) execute(op *Op) (string, Err) {
 	switch op.OpCode {
 	case PUT:
-		kv.db[op.Key] = op.Value
+		kv.DB[op.Key] = op.Value
 		break
 	case GET:
-		v, exist := kv.db[op.Key]
+		v, exist := kv.DB[op.Key]
 		if !exist {
 			return "", ErrNoKey
 		}
 		return v, OK
 	case APPEND:
 
-		if v, exist := kv.db[op.Key]; !exist {
-			kv.db[op.Key] = op.Value
+		if v, exist := kv.DB[op.Key]; !exist {
+			kv.DB[op.Key] = op.Value
 		} else {
-			kv.db[op.Key] = v + op.Value
+			kv.DB[op.Key] = v + op.Value
 		}
 		break
 	}
@@ -257,8 +258,31 @@ func (kv *KVServer) servePendingRPC(apply *raft.ApplyMsg, err Err, value string)
 
 func (kv *KVServer) updateClerkTrack(clerkId int64, seqId int) {
 	kv.mu.Lock()
-	kv.clerkTrack[clerkId] = seqId
+	kv.ClerkTrack[clerkId] = seqId
 	kv.mu.Unlock()
+}
+
+func (kv *KVServer) decodeSnapshot(snapshot []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	if e := d.Decode(&kv.DB); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&kv.ClerkTrack); e != nil {
+		panic(e)
+	}
+}
+
+func (kv *KVServer) encodeSnapshot() []byte {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	s := new(bytes.Buffer)
+	e := labgob.NewEncoder(s)
+	e.Encode(kv.DB)
+	e.Encode(kv.ClerkTrack)
+	return s.Bytes()
 }
 
 func (kv *KVServer) commitProcess() {
@@ -273,7 +297,27 @@ func (kv *KVServer) commitProcess() {
 				kv.updateClerkTrack(op.ClerkId, op.SeqId)
 				DPrintf("server%d apply %+v Index:%d", kv.me, op, apply.CommandIndex)
 			}
-			kv.servePendingRPC(&apply, err, value)
+			if apply.Snapshot {
+				snapshot, _ := (apply.Command).([]byte)
+				kv.decodeSnapshot(snapshot)
+				select {
+				case item := <-kv.committing:
+					DPrintf("retry because install snapshot me: %d %+v Index:%d", kv.me, item, apply.CommandIndex)
+					item.resp(KVRPCResp{
+						true,
+						-1,
+						err,
+						value,
+					})
+					close(item.done)
+				default:
+				}
+			} else {
+				kv.servePendingRPC(&apply, err, value)
+				if apply.LogIndex == kv.maxraftstate {
+					kv.rf.Snapshot(apply.CommandIndex, kv.encodeSnapshot())
+				}
+			}
 			break
 		case <-kv.ctx.Done():
 			return
@@ -328,8 +372,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.booting = true
-	kv.db = make(map[string]string)
-	kv.clerkTrack = make(map[int64]int)
+	kv.DB = make(map[string]string)
+	kv.ClerkTrack = make(map[int64]int)
 	kv.issueing = make(chan KVRPCIssueItem)
 	kv.committing = make(chan KVRPCCommitItem, 1)
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
