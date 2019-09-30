@@ -19,16 +19,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-/*
-	rpc                             issue                         commit
------------------------------------------------------------------------------------
-	issueitem
-		-resp() -------------------------------------------------------
-	GET       --                                                      |
-			    | --> issueing -> issue to raft --> committing -> call resp -> done
-	PUTAPPEND --                                                                |
- reply <--------------issuedone<--------commit done <----------------------------
-*/
 
 type OPCode string
 
@@ -81,6 +71,16 @@ type KVRPCResp struct {
 	err         Err
 	value       string
 }
+/*
+	rpc                             issue                         commit
+-----------------------------------------------------------------------------------
+	issueitem
+		-resp() -------------------------------------------------------
+	GET       --                                                      |
+			    | --> issueing -> issue to raft --> committing -> call resp -> done
+	PUTAPPEND --                                                                |
+ reply <--------------issuedone<--------commit done <----------------------------
+*/
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -382,10 +382,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
-	snapshot := kv.rf.GetSnapshot()
-	if snapshot.Index != 0 {
-		kv.decodeSnapshot(snapshot.Data)
-	}
 	// You may need initialization code here.
 	go kv.commitProcess()
 	go kv.issueProcess()
