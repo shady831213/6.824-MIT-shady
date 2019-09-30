@@ -277,25 +277,22 @@ func (rf *Raft) applyEntries() {
 	}
 	rf.lastApplied = rf.commitIndex
 
-	rf.mu.Unlock()
 	for i, entry := range entries {
 		//RaftDebug("server", rf.me, "applyIndex", rf.lastApplied, "commitIndex", rf.commitIndex, "log", rf.logs)
 		//RaftDebug("server", rf.me, "applyEntries", ApplyMsg{true, command, rf.lastApplied})
-		rf.mu.Lock()
 		stageSize := rf.persister.RaftStateSize()
-		rf.mu.Unlock()
 		rf.applyCh <- ApplyMsg{entry.Command != DummyRaftCommand, entry.Command, lastApplied + i, stageSize, false}
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) applySnapshot() {
 	rf.mu.Lock()
-	snapshot := rf.snapshot
 	if rf.lastApplied < rf.snapshot.Index {
 		rf.lastApplied = rf.snapshot.Index
+		rf.applyCh <- ApplyMsg{false, rf.snapshot.Data, rf.snapshot.Index, 0, true}
 	}
 	rf.mu.Unlock()
-	rf.applyCh <- ApplyMsg{false, snapshot.Data, snapshot.Index, 0, true}
 }
 
 //

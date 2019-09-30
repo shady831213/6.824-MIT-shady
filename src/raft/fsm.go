@@ -274,9 +274,9 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		rf.commitIndex = rf.logIndex(len(rf.logs) - 1)
 		if req.args.LeaderCommit < rf.commitIndex {
 			rf.commitIndex = req.args.LeaderCommit
-			go rf.applyEntries()
 		}
 	}
+	go rf.applyEntries()
 	//println("server", rf.me, "update commitIndex as follower", rf.commitIndex, "log len =", len(rf.logs))
 	//fmt.Printf("logs %+v\n", rf.logs)
 	//println()
@@ -478,19 +478,19 @@ func (rf *Raft) followerState() {
 			return true
 		},
 		startReqAction: func(req *startReq) bool {
-			rf.mu.Lock()
-			req.reply.term = rf.currentTerm
-			req.reply.leader = rf.leader
-			req.reply.role = RaftFollower
-			close(req.done)
-			rf.mu.Unlock()
+			rf.doActions(func() {
+				req.reply.term = rf.currentTerm
+				req.reply.leader = rf.leader
+				req.reply.role = RaftFollower
+				close(req.done)
+			})
 			return false
 		},
 		snapshotReqAction: func(req *snapshotReq) bool {
-			rf.mu.Lock()
-			rf.makeSnapshot(req.index, 0, req.data)
-			close(req.done)
-			rf.mu.Unlock()
+			rf.doActions(func() {
+				rf.makeSnapshot(req.index, 0, req.data)
+				close(req.done)
+			})
 			return false
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
@@ -543,19 +543,19 @@ func (rf *Raft) candidateState() {
 			return true
 		},
 		startReqAction: func(req *startReq) bool {
-			rf.mu.Lock()
-			req.reply.term = rf.currentTerm
-			req.reply.leader = rf.leader
-			req.reply.role = RaftCandidate
-			close(req.done)
-			rf.mu.Unlock()
+			rf.doActions(func() {
+				req.reply.term = rf.currentTerm
+				req.reply.leader = rf.leader
+				req.reply.role = RaftCandidate
+				close(req.done)
+			})
 			return false
 		},
 		snapshotReqAction: func(req *snapshotReq) bool {
-			rf.mu.Lock()
-			rf.makeSnapshot(req.index, 0, req.data)
-			close(req.done)
-			rf.mu.Unlock()
+			rf.doActions(func() {
+				rf.makeSnapshot(req.index, 0, req.data)
+				close(req.done)
+			})
 			return false
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
@@ -626,23 +626,23 @@ func (rf *Raft) leaderState() {
 			return false
 		},
 		startReqAction: func(req *startReq) bool {
-			rf.mu.Lock()
-			req.reply.term = rf.currentTerm
-			req.reply.leader = rf.me
-			req.reply.role = RaftLeader
-			req.reply.index = rf.logIndex(len(rf.logs))
-			rf.logs = append(rf.logs, RaftLogEntry{req.command, rf.currentTerm})
-			rf.persist()
-			close(req.done)
-			rf.mu.Unlock()
+			rf.doActions(func() {
+				req.reply.term = rf.currentTerm
+				req.reply.leader = rf.me
+				req.reply.role = RaftLeader
+				req.reply.index = rf.logIndex(len(rf.logs))
+				rf.logs = append(rf.logs, RaftLogEntry{req.command, rf.currentTerm})
+				rf.persist()
+				close(req.done)
+			})
 			rf.sendAppendEntriesOrInstallSnapshot()
 			return false
 		},
 		snapshotReqAction: func(req *snapshotReq) bool {
-			rf.mu.Lock()
-			rf.makeSnapshot(req.index, 0, req.data)
-			close(req.done)
-			rf.mu.Unlock()
+			rf.doActions(func() {
+				rf.makeSnapshot(req.index, 0, req.data)
+				close(req.done)
+			})
 			return false
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
