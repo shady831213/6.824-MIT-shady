@@ -255,7 +255,7 @@ func (rf *Raft) makeSnapshot(index int, term int, snapshotData []byte) {
 		rf.snapshot.Term = term
 		rf.logs = []RaftLogEntry{{0, 0}}
 	}
-	rf.snapshot.Data = append(rf.snapshot.Data, snapshotData...)
+	rf.snapshot.Data = snapshotData
 	rf.snapshot.Index = index
 	rf.persist()
 	//println("server", rf.me, "make snapshot", fmt.Sprintf("+%v", rf.snapshot))

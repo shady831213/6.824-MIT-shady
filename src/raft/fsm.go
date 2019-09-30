@@ -104,7 +104,7 @@ func (rf *Raft) sendOneInstallSnapshot(server int, term int, snapshot RaftSnapSh
 	}
 }
 
-func (rf *Raft) sendOneAppendEntriesOrsendOneInstallSnapshot(server int) {
+func (rf *Raft) sendOneAppendEntriesOrInstallSnapshot(server int) {
 	var entries []RaftLogEntry
 	rf.mu.Lock()
 	term, role, snapshot := rf.currentTerm, rf.role, rf.snapshot
@@ -134,7 +134,7 @@ func (rf *Raft) sendOneAppendEntriesOrsendOneInstallSnapshot(server int) {
 func (rf *Raft) sendAppendEntriesOrInstallSnapshot() {
 	for i := range rf.peers {
 		if i != rf.me {
-			go rf.sendOneAppendEntriesOrsendOneInstallSnapshot(i)
+			go rf.sendOneAppendEntriesOrInstallSnapshot(i)
 		}
 	}
 }
@@ -706,7 +706,7 @@ func (rf *Raft) leaderState() {
 					rf.nextIndex[resp.server] = conflictIndex
 				}
 				RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "retry...")
-				go rf.sendOneAppendEntriesOrsendOneInstallSnapshot(resp.server)
+				go rf.sendOneAppendEntriesOrInstallSnapshot(resp.server)
 			})
 			return false
 		},
@@ -720,7 +720,7 @@ func (rf *Raft) leaderState() {
 			}
 			rf.setRole(RaftLeader, func() {
 				rf.nextIndex[resp.server] = rf.snapshot.Index + 1
-				go rf.sendOneAppendEntriesOrsendOneInstallSnapshot(resp.server)
+				go rf.sendOneAppendEntriesOrInstallSnapshot(resp.server)
 			})
 			return false
 		},

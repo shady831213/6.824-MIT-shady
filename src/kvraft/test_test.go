@@ -665,6 +665,7 @@ func TestSnapshotSize3B(t *testing.T) {
 
 	for i := 0; i < 200; i++ {
 		Put(cfg, ck, "x", "0")
+		DPrintf("i =%d", i)
 		check(cfg, t, ck, "x", "0")
 		Put(cfg, ck, "x", "1")
 		check(cfg, t, ck, "x", "1")

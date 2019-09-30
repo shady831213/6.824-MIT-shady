@@ -299,13 +299,14 @@ func (kv *KVServer) commitProcess() {
 			}
 			if apply.Snapshot {
 				snapshot, _ := (apply.Command).([]byte)
+				DPrintf("install snapshot before decode me: %d %+v", kv.me, kv.DB)
 				kv.decodeSnapshot(snapshot)
 				select {
 				case item := <-kv.committing:
-					DPrintf("retry because install snapshot me: %d %+v Index:%d", kv.me, item, apply.CommandIndex)
+					DPrintf("install snapshot me: %d %+v %+v %+v", kv.me, kv.DB, item, apply)
 					item.resp(KVRPCResp{
 						true,
-						-1,
+						kv.me,
 						err,
 						value,
 					})
@@ -315,7 +316,7 @@ func (kv *KVServer) commitProcess() {
 			} else {
 				kv.servePendingRPC(&apply, err, value)
 				if apply.StageSize >= kv.maxraftstate && kv.maxraftstate > 0 {
-					DPrintf("make snapshot me: %d Index:%d stageSize %d", kv.me, apply.CommandIndex, apply.StageSize)
+					DPrintf("make snapshot me: %d Index:%d stageSize %d %+v", kv.me, apply.CommandIndex, apply.StageSize, kv.DB)
 					kv.rf.Snapshot(apply.CommandIndex, kv.encodeSnapshot())
 				}
 			}
