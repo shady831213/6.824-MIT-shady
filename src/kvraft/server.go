@@ -18,6 +18,17 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+/*
+	rpc                             issue                         commit
+-----------------------------------------------------------------------------------
+	issueitem
+		-resp() -------------------------------------------------------
+	GET       --                                                      |
+			    | --> issueing -> issue to raft --> committing -> call resp -> done
+	PUTAPPEND --                                                                |
+ reply <--------------issuedone<--------commit done <----------------------------
+*/
+
 type OPCode string
 
 const (
@@ -70,16 +81,6 @@ type KVRPCResp struct {
 	value       string
 }
 
-/*
-	rpc                             issue                         commit
------------------------------------------------------------------------------------
-	issueitem
-		-resp() -------------------------------------------------------
-	GET       --                                                      |
-			    | --> issueing -> issue to raft --> committing -> call resp -> done
-	PUTAPPEND --                                                                |
- reply <--------------issuedone<--------commit done <----------------------------
-*/
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
