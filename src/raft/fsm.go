@@ -276,7 +276,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 			rf.commitIndex = req.args.LeaderCommit
 		}
 	}
-	go rf.applyEntries()
+	//go rf.apply()
 	//println("server", rf.me, "update commitIndex as follower", rf.commitIndex, "log len =", len(rf.logs))
 	//fmt.Printf("logs %+v\n", rf.logs)
 	//println()
@@ -300,10 +300,9 @@ func (rf *Raft) installSnapshot(req *installSnapshotReq) {
 		//if rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term != req.args.LastIncludedTerm {
 		//	panic(fmt.Sprint("installSnapshot term conflict,", rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term, req.args.LastIncludedTerm))
 		//}
-		println("server", rf.me, "make snapshot though installSnapshot rpc")
+		//println("server", rf.me, "make snapshot though installSnapshot rpc")
 		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
-		println("server", rf.me, "make snapshot though installSnapshot rpc")
-		go rf.applySnapshot()
+		//println("server", rf.me, "make snapshot though installSnapshot rpc")
 	}
 	if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
 		fmt.Printf("snapshot to be installed: %+v\n", req.args)
@@ -311,6 +310,10 @@ func (rf *Raft) installSnapshot(req *installSnapshotReq) {
 		fmt.Printf("snapshot: %+v\n", rf.snapshot)
 		println()
 		panic(fmt.Sprint("server ", rf.me, "installSnapshot term conflict from ", req.args.LeaderId, rf.snapshot.Term, req.args.LastIncludedTerm))
+	}
+	//update commitIndex
+	if req.args.LastIncludedIndex > rf.commitIndex {
+		rf.commitIndex = req.args.LastIncludedIndex
 	}
 	rf.leader = req.args.LeaderId
 
@@ -356,7 +359,7 @@ func (rf *Raft) updateCommitIndex(index int) {
 		//Figure8, section 5.4.2
 		if count > len(rf.peers)/2 && rf.logs[rf.logPosition(index)].Term == rf.currentTerm || count == len(rf.peers)-1 {
 			rf.commitIndex = index
-			go rf.applyEntries()
+			//go rf.apply()
 			//println("server", rf.me, "update commitIndex as leader ", rf.commitIndex)
 			return
 		}

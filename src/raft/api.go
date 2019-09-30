@@ -44,6 +44,11 @@ func (rf *Raft) Snapshot(index int, snapshotData []byte) {
 	<-req.done
 }
 
+//called in restart
+func (rf *Raft) GetSnapshot() *RaftSnapShot {
+	return &rf.snapshot
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 //Only for test, so not use msg :)

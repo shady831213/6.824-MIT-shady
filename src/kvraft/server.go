@@ -10,7 +10,7 @@ import (
 	"sync"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -314,7 +314,7 @@ func (kv *KVServer) commitProcess() {
 				}
 			} else {
 				kv.servePendingRPC(&apply, err, value)
-				if apply.StageSize >= kv.maxraftstate {
+				if apply.StageSize >= kv.maxraftstate && kv.maxraftstate > 0 {
 					DPrintf("make snapshot me: %d Index:%d stageSize %d", kv.me, apply.CommandIndex, apply.StageSize)
 					kv.rf.Snapshot(apply.CommandIndex, kv.encodeSnapshot())
 				}
@@ -381,7 +381,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
-
+	snapshot := kv.rf.GetSnapshot()
+	if snapshot.Index != 0 {
+		kv.decodeSnapshot(snapshot.Data)
+	}
 	// You may need initialization code here.
 	go kv.commitProcess()
 	go kv.issueProcess()
