@@ -140,18 +140,6 @@ func (rf *Raft) lastLogEntryInfo() (int, int) {
 	return rf.logIndex(lastIndex), lastTerm
 }
 
-//must be inside critical region
-func (rf *Raft) lastFollowerEntryInfo(follower int) (int, int, int) {
-	index := rf.nextIndex[follower] - 1
-	//RaftDebug("server", rf.me, "matchedIndex of follower", follower, rf.logPosition(index), rf.nextIndex[follower])
-	println("server", rf.me, "matchedIndex of follower", follower, rf.nextIndex[follower])
-	term := rf.logs[rf.logPosition(index)].Term
-	if index == rf.snapshot.Index {
-		term = rf.snapshot.Term
-	}
-	return index, term, rf.commitIndex
-}
-
 //
 // the tester calls Kill() when a Raft instance won't
 // be needed again. you are not required to do anything
