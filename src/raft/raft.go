@@ -93,14 +93,17 @@ type Raft struct {
 	debug      bool
 	dummyCmdEn bool
 	//role state
-	leader              int
-	role                RaftRole
-	ctx                 context.Context
-	cancel              func()
-	voteReqCh           chan *requestVoteReq
-	appendEntriesReqCh  chan *appendEntriesReq
-	voteRespCh          chan *requestVoteResp
-	appendEntriesRespCh chan *appendEntriesResp
+	leader                int
+	role                  RaftRole
+	ctx                   context.Context
+	cancel                func()
+	startReqCh            chan *startReq
+	voteReqCh             chan *requestVoteReq
+	appendEntriesReqCh    chan *appendEntriesReq
+	voteRespCh            chan *requestVoteResp
+	appendEntriesRespCh   chan *appendEntriesResp
+	installSnapshotReqCh  chan *installSnapshotReq
+	installSnapshotRespCh chan *installSnapshotResp
 	// persistent states
 	currentTerm int
 	votedFor    int
@@ -124,18 +127,6 @@ func (rf *Raft) logPosition(i int) int {
 
 func (rf *Raft) logIndex(i int) int {
 	return i + rf.snapshot.Index
-}
-
-// return currentTerm and whether this server
-// believes it is the leader.
-func (rf *Raft) GetState() (int, bool, int) {
-	var term int
-	var role RaftRole
-	var leader int
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	term, role, leader = rf.currentTerm, rf.role, rf.leader
-	return term, role == RaftLeader, leader
 }
 
 func (rf *Raft) apply(applyChan chan ApplyMsg) {
@@ -263,6 +254,60 @@ func (rf *Raft) readSnapshot(data []byte) {
 	}
 }
 
+//API
+type startReply struct {
+	term   int
+	role   RaftRole
+	index  int
+	leader int
+}
+type startReq struct {
+	command interface{}
+	reply   *startReply
+	done    chan struct{}
+}
+
+func (rf *Raft) Start(command interface{}) (int, int, bool, int) {
+	req := startReq{
+		command,
+		&startReply{
+			-1,
+			RaftFollower,
+			-1,
+			-1,
+		},
+		make(chan struct{}),
+	}
+	rf.startReqCh <- &req
+	<-req.done
+	return req.reply.index, req.reply.term, req.reply.role == RaftLeader, req.reply.leader
+	//index := -1
+	//term := -1
+	//isLeader := true
+	//leader := -1
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	//// Your code here (2B).
+	//if term, isLeader, leader = rf.currentTerm, rf.role == RaftLeader, rf.leader; !isLeader {
+	//	return index, term, isLeader, leader
+	//}
+	//index = rf.start(RaftLogEntry{command, term})
+	//
+	//return index, term, isLeader, rf.me
+}
+
+// return currentTerm and whether this server
+// believes it is the leader.
+func (rf *Raft) GetState() (int, bool, int) {
+	var term int
+	var role RaftRole
+	var leader int
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term, role, leader = rf.currentTerm, rf.role, rf.leader
+	return term, role == RaftLeader, leader
+}
+
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -367,6 +412,42 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	<-req.done
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+type installSnapshotReq struct {
+	args  *InstallSnapshotArgs
+	reply *InstallSnapshotReply
+	done  chan struct{}
+}
+
+type installSnapshotResp struct {
+	args   *InstallSnapshotArgs
+	reply  *InstallSnapshotReply
+	server int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	RaftDebug("server", rf.me, "get installSnapshot rpc from", args.LeaderId)
+	// Your code here (2A, 2B).
+	req := installSnapshotReq{
+		args:  args,
+		reply: reply,
+		done:  make(chan struct{}),
+	}
+	rf.installSnapshotReqCh <- &req
+	<-req.done
+}
+
 //
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -423,7 +504,7 @@ func (rf *Raft) sendRequestVote() {
 	}
 }
 
-func (rf *Raft) sendOneAppendEntries(server int) bool {
+func (rf *Raft) sendOneAppendEntries(server int) {
 	var entries []RaftLogEntry
 	rf.mu.Lock()
 	term, role := rf.currentTerm, rf.role
@@ -451,7 +532,29 @@ func (rf *Raft) sendOneAppendEntries(server int) bool {
 
 		}
 	}
-	return true
+}
+
+func (rf *Raft) sendOneInstallSnapshot(server int) {
+	rf.mu.Lock()
+	term, role, snapshot := rf.currentTerm, rf.role, rf.snapshot
+	rf.mu.Unlock()
+	RaftDebug("server", rf.me, "before send installSnapshot to", server, "role", role)
+	if role == RaftLeader {
+		args := InstallSnapshotArgs{
+			Term:              term,
+			LeaderId:          rf.me,
+			LastIncludedIndex: snapshot.Index,
+			LastIncludedTerm:  snapshot.Term,
+			Data:              snapshot.Data,
+		}
+		reply := InstallSnapshotReply{}
+		RaftDebug("server", rf.me, "send installSnapshot to", server)
+		if ok := rf.peers[server].Call("Raft.InstallSnapshot", &args, &reply); ok {
+			//deal response
+			RaftDebug("server", rf.me, "get installSnapshot response from", server)
+			rf.installSnapshotRespCh <- &installSnapshotResp{args: &args, reply: &reply, server: server}
+		}
+	}
 }
 
 func (rf *Raft) sendAppendEntries() {
@@ -476,39 +579,25 @@ func (rf *Raft) sendAppendEntries() {
 // term. the third return value is true if this server believes it is
 // the leader.
 //
-func (rf *Raft) start(entry RaftLogEntry) int {
-	var index int
-
-	index = rf.logIndex(len(rf.logs))
-	rf.logs = append(rf.logs, entry)
-	rf.persist()
-	RaftDebug("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
-	//println("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
-	rf.sendAppendEntries()
-	return index
-}
-
-func (rf *Raft) Start(command interface{}) (int, int, bool, int) {
-	index := -1
-	term := -1
-	isLeader := true
-	leader := -1
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	// Your code here (2B).
-	if term, isLeader, leader = rf.currentTerm, rf.role == RaftLeader, rf.leader; !isLeader {
-		return index, term, isLeader, leader
-	}
-	index = rf.start(RaftLogEntry{command, term})
-
-	return index, term, isLeader, rf.me
-}
+//func (rf *Raft) start(entry RaftLogEntry) int {
+//	var index int
+//
+//	index = rf.logIndex(len(rf.logs))
+//	rf.logs = append(rf.logs, entry)
+//	rf.persist()
+//	RaftDebug("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
+//	//println("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
+//	rf.sendAppendEntries()
+//	return index
+//}
 
 func (rf *Raft) Snapshot(index int, snapshotData []byte) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
+}
+
+func (rf *Raft) makeSnapshot(index int, snapshotData []byte) {
 	rf.snapshot.Index = index
-	rf.snapshot.Term = rf.logs[index].Term
+	rf.snapshot.Term = rf.logs[rf.logPosition(index)].Term
 	rf.snapshot.Data = append(rf.snapshot.Data, snapshotData...)
 	rf.logs = rf.logs[rf.logPosition(index+1):]
 	rf.persist()
@@ -586,26 +675,36 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		return
 	}
 	//term not match
-	if entry := rf.logs[rf.logPosition(req.args.PrevLogIndex)]; entry.Term != req.args.PrevLogTerm {
+	if req.args.PrevLogIndex < rf.snapshot.Index {
 		req.reply.Success = false
-		req.reply.ConflictTerm = entry.Term
-		for i := req.args.PrevLogIndex; i >= 0; i -- {
-			if rf.logs[rf.logPosition(i)].Term != req.reply.ConflictTerm {
-				req.reply.ConflictIndex = i + 1
-				break
-			}
-		}
-		return
+		req.reply.ConflictIndex = rf.snapshot.Index + 1
+		req.reply.ConflictTerm = -1
 	}
-	//check conflict
+	//when follower snapshoted and leader have not, because all snapshoted entry must be committed, no way term conflict in snapshot
+	if req.args.PrevLogIndex == rf.snapshot.Index && req.args.PrevLogTerm != rf.snapshot.Term {
+		panic(fmt.Sprint("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "conflict snapshot term", req.args.PrevLogTerm, rf.snapshot.Term))
+	}
+
+	if req.args.PrevLogIndex > rf.snapshot.Index {
+		if entry := rf.logs[rf.logPosition(req.args.PrevLogIndex)]; entry.Term != req.args.PrevLogTerm {
+			req.reply.Success = false
+			req.reply.ConflictTerm = entry.Term
+			for i := rf.logPosition(req.args.PrevLogIndex); i >= 0; i -- {
+				if rf.logs[i].Term != req.reply.ConflictTerm {
+					req.reply.ConflictIndex = rf.logIndex(i + 1)
+					break
+				}
+			}
+			if req.reply.ConflictIndex <= rf.snapshot.Index {
+				panic(fmt.Sprint("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "conflict snapshot term", req.args.PrevLogTerm, rf.snapshot.Term))
+			}
+			return
+		}
+	}
+	//conflict all solved above, just attach
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "can update entries")
 	if req.args.PrevLogIndex < rf.logIndex(len(rf.logs)-1) {
-		for i, e := range req.args.Entries {
-			if rf.logs[rf.logPosition(req.args.PrevLogIndex+1+i)].Term != e.Term || rf.logPosition(req.args.PrevLogIndex+1+i) == len(rf.logs)-1 {
-				rf.logs = append(rf.logs[:rf.logPosition(req.args.PrevLogIndex+1+i)], req.args.Entries[i:]...)
-				break
-			}
-		}
+		rf.logs = append(rf.logs[:rf.logPosition(req.args.PrevLogIndex+1)], req.args.Entries...)
 	} else {
 		//rf.logs all committed
 		rf.logs = append(rf.logs, req.args.Entries...)
@@ -627,6 +726,30 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	//println()
 	rf.leader = req.args.LeaderId
 	req.reply.Success = true
+
+}
+
+func (rf *Raft) installSnapshot(req *installSnapshotReq) {
+	defer func() {
+		req.done <- struct{}{}
+		close(req.done)
+	}()
+	RaftDebug("server", rf.me, "term", rf.currentTerm, "request term", req.args.Term, "server role", rf.role)
+	req.reply.Term = rf.currentTerm
+	if req.args.Term < rf.currentTerm {
+		return
+	}
+	RaftDebug("server", rf.me, "get installSnapshot rpc from", req.args.LeaderId, "LastIncludedIndex", req.args.LastIncludedIndex, "LastIncludedTerm", req.args.LastIncludedTerm)
+	if req.args.LastIncludedIndex > rf.snapshot.Index {
+		if rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term != req.args.LastIncludedTerm {
+			panic(fmt.Sprint("installSnapshot term conflict,", rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term, req.args.LastIncludedTerm))
+		}
+		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.Data)
+	}
+	if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
+		panic(fmt.Sprint("installSnapshot term conflict,", rf.snapshot.Term, req.args.LastIncludedTerm))
+	}
+	rf.leader = req.args.LeaderId
 
 }
 
@@ -702,13 +825,16 @@ func (rf *Raft) fsm() {
 }
 
 type raftStateOpts struct {
-	stateName               string
-	timeout                 func() time.Duration
-	timeoutAction           func() bool
-	requestVoteReqAction    func(*requestVoteReq) bool
-	requestVoteRespAction   func(*requestVoteResp) bool
-	appendEntriesReqAction  func(*appendEntriesReq) bool
-	appendEntriesRespAction func(*appendEntriesResp) bool
+	stateName                 string
+	timeout                   func() time.Duration
+	timeoutAction             func() bool
+	startReqAction            func(*startReq) bool
+	requestVoteReqAction      func(*requestVoteReq) bool
+	requestVoteRespAction     func(*requestVoteResp) bool
+	appendEntriesReqAction    func(*appendEntriesReq) bool
+	appendEntriesRespAction   func(*appendEntriesResp) bool
+	installSnapshotReqAction  func(*installSnapshotReq) bool
+	installSnapshotRespAction func(resp *installSnapshotResp) bool
 }
 
 func (rf *Raft) stateHandler(opts raftStateOpts) {
@@ -723,6 +849,12 @@ func (rf *Raft) stateHandler(opts raftStateOpts) {
 		case <-rf.ctx.Done():
 			rf.setRole(RaftStop)
 			return
+		case req := <-rf.startReqCh:
+			RaftDebug("server", rf.me, "get start request in", opts.stateName)
+			if opts.startReqAction(req) {
+				return
+			}
+			break
 		case req := <-rf.voteReqCh:
 			RaftDebug("server", rf.me, "get vote request from", req.args.CandidateId, "in", opts.stateName)
 			if opts.requestVoteReqAction(req) {
@@ -735,6 +867,12 @@ func (rf *Raft) stateHandler(opts raftStateOpts) {
 				return
 			}
 			break
+		case req := <-rf.installSnapshotReqCh:
+			RaftDebug("server", rf.me, "get installSnapshotReq request from", req.args.LeaderId, "in", opts.stateName)
+			if opts.installSnapshotReqAction(req) {
+				return
+			}
+			break
 		case resp := <-rf.voteRespCh:
 			RaftDebug("server", rf.me, "get vote resp from", resp.server, "in", opts.stateName)
 			if opts.requestVoteRespAction(resp) {
@@ -744,6 +882,12 @@ func (rf *Raft) stateHandler(opts raftStateOpts) {
 		case resp := <-rf.appendEntriesRespCh:
 			RaftDebug("server", rf.me, "get appendEntriesResp from", resp.server, "in", opts.stateName)
 			if opts.appendEntriesRespAction(resp) {
+				return
+			}
+			break
+		case resp := <-rf.installSnapshotRespCh:
+			RaftDebug("server", rf.me, "get installSnapshotResp from", resp.server, "in", opts.stateName)
+			if opts.installSnapshotRespAction(resp) {
 				return
 			}
 			break
@@ -766,6 +910,15 @@ func (rf *Raft) followerState() {
 			rf.setRole(RaftCandidate)
 			return true
 		},
+		startReqAction: func(req *startReq) bool {
+			rf.mu.Lock()
+			req.reply.term = rf.currentTerm
+			req.reply.leader = rf.leader
+			req.reply.role = RaftFollower
+			close(req.done)
+			rf.mu.Unlock()
+			return false
+		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
 			rf.backToFollower(req.args.Term, func() {
 				rf.requestVote(req)
@@ -787,6 +940,15 @@ func (rf *Raft) followerState() {
 		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
 			return rf.backToFollower(resp.reply.Term)
 		},
+		installSnapshotReqAction: func(req *installSnapshotReq) bool {
+			rf.backToFollower(req.args.Term, func() {
+				rf.installSnapshot(req)
+			})
+			return true
+		},
+		installSnapshotRespAction: func(resp *installSnapshotResp) bool {
+			return rf.backToFollower(resp.reply.Term)
+		},
 	})
 }
 
@@ -805,6 +967,15 @@ func (rf *Raft) candidateState() {
 		timeout:   rf.getElectionTimeout,
 		timeoutAction: func() bool {
 			return true
+		},
+		startReqAction: func(req *startReq) bool {
+			rf.mu.Lock()
+			req.reply.term = rf.currentTerm
+			req.reply.leader = rf.leader
+			req.reply.role = RaftCandidate
+			close(req.done)
+			rf.mu.Unlock()
+			return false
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
 			return rf.backToFollower(req.args.Term, func() {
@@ -837,6 +1008,15 @@ func (rf *Raft) candidateState() {
 		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
 			return rf.backToFollower(resp.reply.Term)
 		},
+		installSnapshotReqAction: func(req *installSnapshotReq) bool {
+			return rf.backToFollower(req.args.Term, func() {
+				//println("server", rf.me, "get append req from", req.args.LeaderId, "term", req.args.Term)
+				rf.installSnapshot(req)
+			})
+		},
+		installSnapshotRespAction: func(resp *installSnapshotResp) bool {
+			return rf.backToFollower(resp.reply.Term)
+		},
 	})
 }
 
@@ -861,6 +1041,19 @@ func (rf *Raft) leaderState() {
 			return RaftHeartBeatPeriod
 		},
 		timeoutAction: func() bool {
+			rf.sendAppendEntries()
+			return false
+		},
+		startReqAction: func(req *startReq) bool {
+			rf.mu.Lock()
+			req.reply.term = rf.currentTerm
+			req.reply.leader = rf.me
+			req.reply.role = RaftLeader
+			req.reply.index = rf.logIndex(len(rf.logs))
+			rf.logs = append(rf.logs, RaftLogEntry{req.command, rf.currentTerm})
+			rf.persist()
+			close(req.done)
+			rf.mu.Unlock()
 			rf.sendAppendEntries()
 			return false
 		},
@@ -917,9 +1110,29 @@ func (rf *Raft) leaderState() {
 					}
 					rf.nextIndex[resp.server] = conflictIndex
 				}
-				RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "retry...")
-				go rf.sendOneAppendEntries(resp.server)
+				if rf.nextIndex[resp.server] <= rf.snapshot.Index {
+					RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "install snapshot...")
+					go rf.sendOneInstallSnapshot(resp.server)
+				} else {
+					RaftDebug("server", rf.me, "appendEntries fail to", resp.server, "matchedIndex", rf.nextIndex[resp.server], "retry...")
+					go rf.sendOneAppendEntries(resp.server)
+				}
 			})
+			return false
+		},
+		installSnapshotReqAction: func(req *installSnapshotReq) bool {
+			return rf.backToFollower(req.args.Term, func() {
+				//println("server", rf.me, "get append req from", req.args.LeaderId, "term", req.args.Term)
+				rf.installSnapshot(req)
+			})
+		},
+		installSnapshotRespAction: func(resp *installSnapshotResp) bool {
+			if rf.backToFollower(resp.reply.Term) {
+				//println("server", rf.me, "get append resp term", resp.reply.Term)
+				return true
+			}
+			rf.nextIndex[resp.server] = rf.snapshot.Index + 1
+			go rf.sendOneAppendEntries(resp.server)
 			return false
 		},
 	})
@@ -947,10 +1160,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.leader = -1
 	rf.dummyCmdEn = dummyCmdEn
 	rf.role = RaftFollower
+	rf.startReqCh = make(chan *startReq, 1)
 	rf.voteReqCh = make(chan *requestVoteReq, len(rf.peers))
-	rf.appendEntriesReqCh = make(chan *appendEntriesReq, len(rf.peers))
 	rf.voteRespCh = make(chan *requestVoteResp, len(rf.peers))
+	rf.appendEntriesReqCh = make(chan *appendEntriesReq, len(rf.peers))
 	rf.appendEntriesRespCh = make(chan *appendEntriesResp, len(rf.peers))
+	rf.installSnapshotReqCh = make(chan *installSnapshotReq, len(rf.peers))
+	rf.installSnapshotRespCh = make(chan *installSnapshotResp, len(rf.peers))
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.logs = []RaftLogEntry{{0, 0}}
