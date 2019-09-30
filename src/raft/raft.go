@@ -278,7 +278,7 @@ func (rf *Raft) apply() {
 		for i := lastApplied; i < rf.commitIndex; i ++ {
 			entries = append(entries, ApplyMsg{rf.logs[rf.logPosition(i)].Command != DummyRaftCommand, rf.logs[rf.logPosition(i)].Command, i, 0, false})
 		}
-		if lastApplied <= rf.commitIndex {
+		if rf.snapshot.Index < rf.commitIndex {
 			entries = append(entries, ApplyMsg{rf.logs[rf.logPosition(rf.commitIndex)].Command != DummyRaftCommand, rf.logs[rf.logPosition(rf.commitIndex)].Command, rf.commitIndex, rf.persister.RaftStateSize(), false})
 		}
 		//println("server", rf.me, "apply log lastAppliy", rf.lastApplied, "commitIndex", rf.commitIndex, fmt.Sprintf("logs %+v entries %+v", rf.logs, entries))
