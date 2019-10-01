@@ -91,13 +91,14 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	booting    bool
-	DB         map[string]string
-	ClerkTrack map[int64]int
-	ctx        context.Context
-	cancel     func()
-	issueing   chan KVRPCIssueItem
-	committing chan KVRPCCommitItem
+	booting      bool
+	DB           map[string]string
+	ClerkTrack   map[int64]int
+	ctx          context.Context
+	cancel       func()
+	issueing     chan KVRPCIssueItem
+	committing   chan KVRPCCommitItem
+	pendingIndex int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -190,7 +191,8 @@ func (kv *KVServer) issue(item KVRPCIssueItem) {
 		return
 	}
 
-	if _, _, isLeader, leader := kv.rf.Start(*item.op); !isLeader {
+	index, _, isLeader, leader := kv.rf.Start(*item.op)
+	if !isLeader {
 		item.wrongLeaderHandler(leader)
 		return
 
@@ -202,6 +204,9 @@ func (kv *KVServer) issue(item KVRPCIssueItem) {
 			make(chan struct{}),
 		},
 	}
+	kv.mu.Lock()
+	kv.pendingIndex = index
+	kv.mu.Unlock()
 	kv.committing <- commit
 	DPrintf("Waiting commitProcess me: %d %+v", kv.me, item.op)
 	<-commit.done
@@ -245,10 +250,12 @@ func (kv *KVServer) execute(op *Op) (string, Err) {
 }
 
 func (kv *KVServer) servePendingRPC(apply *raft.ApplyMsg, err Err, value string) {
-	select {
-	case item := <-kv.committing:
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if apply.CommandIndex == kv.pendingIndex {
+		item := <-kv.committing
 		op, ok := (apply.Command).(Op)
-		DPrintf("commitProcess me: %d %+v %+v Index:%d", kv.me, op, item, apply.CommandIndex)
+		DPrintf("commitProcess me: %d %+v %+v Index:%d", kv.me, op, item.op, apply.CommandIndex)
 		item.resp(KVRPCResp{
 			op.SeqId != item.op.SeqId || op.ClerkId != item.op.ClerkId || !ok || !apply.CommandValid,
 			op.ServerId,
@@ -256,7 +263,6 @@ func (kv *KVServer) servePendingRPC(apply *raft.ApplyMsg, err Err, value string)
 			value,
 		})
 		close(item.done)
-	default:
 	}
 
 }
@@ -374,6 +380,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.issueing = make(chan KVRPCIssueItem)
 	kv.committing = make(chan KVRPCCommitItem, 1)
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
+	kv.pendingIndex = 0
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
