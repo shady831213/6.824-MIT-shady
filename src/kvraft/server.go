@@ -263,6 +263,23 @@ func (kv *KVServer) servePendingRPC(apply *raft.ApplyMsg, err Err, value string)
 			value,
 		})
 		close(item.done)
+		return
+	}
+	if apply.CommandIndex > kv.pendingIndex {
+		select {
+		case item := <-kv.committing:
+			DPrintf("commitProcess me: %d  %+v Index:%d", kv.me, item.op, apply.CommandIndex)
+			item.resp(KVRPCResp{
+				true,
+				kv.me,
+				err,
+				value,
+			})
+			close(item.done)
+
+		default:
+
+		}
 	}
 
 }
