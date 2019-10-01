@@ -328,6 +328,7 @@ func (kv *KVServer) commitProcess() {
 // turn off debug output from this instance.
 //
 func (kv *KVServer) Kill() {
+	DPrintf("server%d killed", kv.me)
 	kv.rf.Kill()
 	// Your code here, if desired.
 	kv.cancel()
@@ -379,6 +380,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	go kv.commitProcess()
 	go kv.issueProcess()
+	DPrintf("server%d start", kv.me)
 
 	return kv
 }

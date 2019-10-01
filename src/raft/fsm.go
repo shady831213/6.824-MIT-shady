@@ -223,7 +223,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	if req.args.PrevLogIndex == rf.snapshot.Index && req.args.PrevLogTerm != rf.snapshot.Term {
 		req.reply.Success = false
 		req.reply.ConflictIndex = rf.snapshot.Index + 1
-		req.reply.ConflictTerm = rf.snapshot.Term
+		req.reply.ConflictTerm = -1
 		return
 	}
 
@@ -637,8 +637,8 @@ func (rf *Raft) leaderState() {
 				close(req.done)
 				rf.logs = append(rf.logs, RaftLogEntry{req.command, rf.currentTerm})
 				rf.persist()
-				rf.sendAppendEntriesOrInstallSnapshot(1 * time.Microsecond)
 			})
+			go rf.sendAppendEntriesOrInstallSnapshot(1 * time.Microsecond)
 			return false
 		},
 		snapshotReqAction: func(req *snapshotReq) bool {
@@ -693,18 +693,14 @@ func (rf *Raft) leaderState() {
 					rf.nextIndex[resp.server] = resp.reply.ConflictIndex
 				} else {
 					conflictIndex := resp.reply.ConflictIndex
-					if conflictIndex <= rf.snapshot.Index {
-						conflictIndex = rf.snapshot.Index
-					} else {
-						for i := rf.nextIndex[resp.server] - 1; i >= 0; i-- {
-							if rf.logs[rf.logPosition(i)].Term == resp.reply.ConflictTerm {
-								conflictIndex = i + 1
-								break
-							}
-							if rf.logPosition(i) == 0 {
-								conflictIndex = rf.snapshot.Index
-								break
-							}
+					for i := rf.nextIndex[resp.server] - 1; i >= 0; i-- {
+						if rf.logs[rf.logPosition(i)].Term == resp.reply.ConflictTerm {
+							conflictIndex = i + 1
+							break
+						}
+						if rf.logPosition(i) == 0 {
+							conflictIndex = rf.snapshot.Index
+							break
 						}
 					}
 					rf.nextIndex[resp.server] = conflictIndex
