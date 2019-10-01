@@ -190,7 +190,7 @@ func (kv *KVServer) issue(item KVRPCIssueItem) {
 		return
 	}
 
-	if _, isLeader, leader := kv.rf.GetState(); !isLeader {
+	if _, _, isLeader, leader := kv.rf.Start(*item.op); !isLeader {
 		item.wrongLeaderHandler(leader)
 		return
 
@@ -202,9 +202,8 @@ func (kv *KVServer) issue(item KVRPCIssueItem) {
 			make(chan struct{}),
 		},
 	}
-	DPrintf("Waiting commitProcess me: %d %+v", kv.me, item.op)
 	kv.committing <- commit
-	kv.rf.Start(*item.op)
+	DPrintf("Waiting commitProcess me: %d %+v", kv.me, item.op)
 	<-commit.done
 }
 

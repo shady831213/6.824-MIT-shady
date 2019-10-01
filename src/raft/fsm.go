@@ -131,7 +131,8 @@ func (rf *Raft) sendOneAppendEntriesOrInstallSnapshot(server int) {
 
 }
 
-func (rf *Raft) sendAppendEntriesOrInstallSnapshot() {
+func (rf *Raft) sendAppendEntriesOrInstallSnapshot(delay time.Duration) {
+	time.Sleep(delay)
 	for i := range rf.peers {
 		if i != rf.me {
 			go rf.sendOneAppendEntriesOrInstallSnapshot(i)
@@ -153,18 +154,6 @@ func (rf *Raft) sendAppendEntriesOrInstallSnapshot() {
 // term. the third return value is true if this server believes it is
 // the leader.
 //
-//func (rf *Raft) start(entry RaftLogEntry) int {
-//	var index int
-//
-//	index = rf.logIndex(len(rf.logs))
-//	rf.logs = append(rf.logs, entry)
-//	rf.persist()
-//	RaftDebug("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
-//	//println("server", rf.me, "start cmd", entry.Command, "logs", rf.logs)
-//	rf.sendAppendEntriesOrInstallSnapshot()
-//	return index
-//}
-
 //
 // Raft state machine
 //
@@ -626,7 +615,7 @@ func (rf *Raft) leaderState() {
 		rf.persist()
 	}
 	rf.mu.Unlock()
-	rf.sendAppendEntriesOrInstallSnapshot()
+	rf.sendAppendEntriesOrInstallSnapshot(0)
 
 	rf.stateHandler(raftStateOpts{
 		stateName: "leaderState",
@@ -634,7 +623,9 @@ func (rf *Raft) leaderState() {
 			return RaftHeartBeatPeriod
 		},
 		timeoutAction: func() bool {
-			rf.sendAppendEntriesOrInstallSnapshot()
+			rf.doActions(func() {
+				rf.sendAppendEntriesOrInstallSnapshot(0)
+			})
 			return false
 		},
 		startReqAction: func(req *startReq) bool {
@@ -646,7 +637,7 @@ func (rf *Raft) leaderState() {
 				close(req.done)
 				rf.logs = append(rf.logs, RaftLogEntry{req.command, rf.currentTerm})
 				rf.persist()
-				rf.sendAppendEntriesOrInstallSnapshot()
+				rf.sendAppendEntriesOrInstallSnapshot(1 * time.Microsecond)
 			})
 			return false
 		},
@@ -702,14 +693,18 @@ func (rf *Raft) leaderState() {
 					rf.nextIndex[resp.server] = resp.reply.ConflictIndex
 				} else {
 					conflictIndex := resp.reply.ConflictIndex
-					for i := rf.nextIndex[resp.server] - 1; i >= 0; i-- {
-						if rf.logs[rf.logPosition(i)].Term == resp.reply.ConflictTerm {
-							conflictIndex = i + 1
-							break
-						}
-						if rf.logPosition(i) == 0 {
-							conflictIndex = rf.snapshot.Index
-							break
+					if conflictIndex <= rf.snapshot.Index {
+						conflictIndex = rf.snapshot.Index
+					} else {
+						for i := rf.nextIndex[resp.server] - 1; i >= 0; i-- {
+							if rf.logs[rf.logPosition(i)].Term == resp.reply.ConflictTerm {
+								conflictIndex = i + 1
+								break
+							}
+							if rf.logPosition(i) == 0 {
+								conflictIndex = rf.snapshot.Index
+								break
+							}
 						}
 					}
 					rf.nextIndex[resp.server] = conflictIndex
