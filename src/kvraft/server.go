@@ -125,6 +125,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	kv.issueing <- issue
 	<-issue.done
+	DPrintf("reply Get done me: %d %+v", kv.me, issue.op)
 }
 
 func (kv *KVServer) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
@@ -181,15 +182,17 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	kv.issueing <- issue
 	<-issue.done
+	DPrintf("reply NotLeader done me: %d %+v", kv.me, issue.op)
 }
 
 func (kv *KVServer) issue(item KVRPCIssueItem) {
 	if !item.preIssueCheck() {
 		return
 	}
-	if _, _, isLeader, leader := kv.rf.Start(*item.op); !isLeader {
+	if _,isLeader,leader := kv.rf.GetState();!isLeader{
 		item.wrongLeaderHandler(leader)
 		return
+
 	}
 	commit := KVRPCCommitItem{
 		kvRPCItem{
@@ -199,7 +202,8 @@ func (kv *KVServer) issue(item KVRPCIssueItem) {
 		},
 	}
 	kv.committing <- commit
-	DPrintf("Waiting commitProcess me: %d %+v", kv.me, item)
+	kv.rf.Start(*item.op)
+	DPrintf("Waiting commitProcess me: %d %+v", kv.me, item.op)
 	<-commit.done
 }
 
@@ -209,6 +213,7 @@ func (kv *KVServer) issueProcess() {
 		case item := <-kv.issueing:
 			kv.issue(item)
 			item.done <- struct{}{}
+			DPrintf("issue done me: %d %+v", kv.me, item.op)
 			break
 		case <-kv.ctx.Done():
 			return
@@ -301,18 +306,6 @@ func (kv *KVServer) commitProcess() {
 				snapshot, _ := (apply.Command).([]byte)
 				DPrintf("install snapshot before decode me: %d %+v", kv.me, kv.DB)
 				kv.decodeSnapshot(snapshot)
-				select {
-				case item := <-kv.committing:
-					DPrintf("install snapshot me: %d %+v %+v %+v", kv.me, kv.DB, item, apply)
-					item.resp(KVRPCResp{
-						true,
-						kv.me,
-						err,
-						value,
-					})
-					close(item.done)
-				default:
-				}
 			} else {
 				kv.servePendingRPC(&apply, err, value)
 				if apply.StageSize >= kv.maxraftstate && kv.maxraftstate > 0 {
@@ -320,6 +313,7 @@ func (kv *KVServer) commitProcess() {
 					kv.rf.Snapshot(apply.CommandIndex, kv.encodeSnapshot())
 				}
 			}
+			DPrintf("server%d apply Index:%d done", kv.me, apply.CommandIndex)
 			break
 		case <-kv.ctx.Done():
 			return

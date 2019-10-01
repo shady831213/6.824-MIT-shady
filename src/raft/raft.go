@@ -107,6 +107,7 @@ type Raft struct {
 	appendEntriesRespCh   chan *appendEntriesResp
 	installSnapshotReqCh  chan *installSnapshotReq
 	installSnapshotRespCh chan *installSnapshotResp
+	canApply              chan struct{}
 	applyCh               chan ApplyMsg
 	// persistent states
 	currentTerm int
@@ -258,7 +259,6 @@ func (rf *Raft) makeSnapshot(index int, term int, snapshotData []byte) {
 	rf.snapshot.Data = snapshotData
 	rf.snapshot.Index = index
 	rf.persist()
-	//println("server", rf.me, "make snapshot", fmt.Sprintf("+%v", rf.snapshot))
 }
 
 func (rf *Raft) getElectionTimeout() time.Duration {
@@ -266,31 +266,35 @@ func (rf *Raft) getElectionTimeout() time.Duration {
 }
 
 func (rf *Raft) apply() {
+	RaftDebug("server", rf.me, "begin apply")
 	rf.mu.Lock()
 	entries := make([]ApplyMsg, 0)
 	lastApplied := rf.lastApplied + 1
-	//println("server", rf.me, "apply, lastAppliy", rf.lastApplied, "commitIndex", rf.commitIndex, fmt.Sprintf("logs %+v", rf.logs))
+	RaftDebug("server", rf.me, "apply, lastAppliy", rf.lastApplied, "commitIndex", rf.commitIndex)
 	if rf.lastApplied < rf.commitIndex {
 		if rf.lastApplied <= rf.snapshot.Index && rf.snapshot.Index != 0 {
 			entries = append(entries, ApplyMsg{false, rf.snapshot.Data, rf.snapshot.Index, 0, true})
 			lastApplied = rf.snapshot.Index + 1
 		}
-		for i := lastApplied; i < rf.commitIndex; i ++ {
-			entries = append(entries, ApplyMsg{rf.logs[rf.logPosition(i)].Command != DummyRaftCommand, rf.logs[rf.logPosition(i)].Command, i, 0, false})
+		if lastApplied <= rf.commitIndex {
+			commitEntris := rf.logs[rf.logPosition(lastApplied):rf.logPosition(rf.commitIndex)+1]
+			for i, e := range commitEntris {
+				if i == len(commitEntris)-1 {
+					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command, lastApplied + i, rf.persister.RaftStateSize(), false})
+				} else {
+					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command, lastApplied + i, 0, false})
+				}
+			}
+
 		}
-		if rf.snapshot.Index < rf.commitIndex {
-			entries = append(entries, ApplyMsg{rf.logs[rf.logPosition(rf.commitIndex)].Command != DummyRaftCommand, rf.logs[rf.logPosition(rf.commitIndex)].Command, rf.commitIndex, rf.persister.RaftStateSize(), false})
-		}
-		//println("server", rf.me, "apply log lastAppliy", rf.lastApplied, "commitIndex", rf.commitIndex, fmt.Sprintf("logs %+v entries %+v", rf.logs, entries))
-		//println()
+		rf.lastApplied = rf.commitIndex
 	}
-	rf.lastApplied = rf.commitIndex
+	RaftDebug("server", rf.me, "apply before unlock")
 	rf.mu.Unlock()
 	for _, entry := range entries {
-		//RaftDebug("server", rf.me, "applyIndex", rf.lastApplied, "commitIndex", rf.commitIndex, "log", rf.logs)
-		//RaftDebug("server", rf.me, "apply", ApplyMsg{true, command, rf.lastApplied})
 		rf.applyCh <- entry
 	}
+	RaftDebug("server", rf.me, "apply done")
 
 }
 
@@ -335,6 +339,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		make([]byte, 0),
 	}
 	rf.applyCh = applyCh
+	rf.canApply = make(chan struct{})
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
@@ -349,8 +354,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			select {
 			case <-rf.ctx.Done():
 				return
-			case <-time.After(RaftHeartBeatPeriod):
+			case <-rf.canApply:
+				RaftDebug("server", rf.me, "got can apply")
 				rf.apply()
+				RaftDebug("server", rf.me, "can apply done")
 				break
 			}
 		}

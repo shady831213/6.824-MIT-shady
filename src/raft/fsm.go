@@ -231,13 +231,11 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		req.reply.ConflictTerm = -1
 		return
 	}
-	//when follower snapshoted and leader have not, because all snapshoted entry must be committed, no way term conflict in snapshot
 	if req.args.PrevLogIndex == rf.snapshot.Index && req.args.PrevLogTerm != rf.snapshot.Term {
-		fmt.Printf("append args: %+v\n", req.args)
-		println()
-		fmt.Printf("snapshot: %+v\n", rf.snapshot)
-		println()
-		panic(fmt.Sprint("server ", rf.me, " get appendEntries rpc from ", req.args.LeaderId, " PrevLogIndex ", req.args.PrevLogIndex, " conflict snapshot term ", req.args.PrevLogTerm, rf.snapshot.Term))
+		req.reply.Success = false
+		req.reply.ConflictIndex = rf.snapshot.Index
+		req.reply.ConflictTerm = rf.snapshot.Term
+		return
 	}
 
 	if req.args.PrevLogIndex > rf.snapshot.Index {
@@ -275,8 +273,12 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		if req.args.LeaderCommit < rf.commitIndex {
 			rf.commitIndex = req.args.LeaderCommit
 		}
+		RaftDebug("server", rf.me, "update commitIndex through appendEntries success from", req.args.LeaderId, rf.commitIndex, req.args.LeaderCommit)
+		go func() {
+			rf.canApply <- struct{}{}
+		}()
 	}
-	//go rf.apply()
+
 	//println("server", rf.me, "update commitIndex as follower", rf.commitIndex, "log len =", len(rf.logs))
 	//fmt.Printf("logs %+v\n", rf.logs)
 	//println()
@@ -314,6 +316,11 @@ func (rf *Raft) installSnapshot(req *installSnapshotReq) {
 	//update commitIndex
 	if req.args.LastIncludedIndex > rf.commitIndex {
 		rf.commitIndex = req.args.LastIncludedIndex
+		RaftDebug("server", rf.me, "update commitIndex through installSnapshot success from", req.args.LeaderId, rf.commitIndex, req.args.LastIncludedIndex)
+
+		go func() {
+			rf.canApply <- struct{}{}
+		}()
 	}
 	rf.leader = req.args.LeaderId
 
@@ -355,12 +362,14 @@ func (rf *Raft) updateCommitIndex(index int) {
 		if m >= index {
 			count++
 		}
-		//println("server", rf.me, "update commitIndex as leader ", index, count, fmt.Sprintf("%+v", rf.matchedIndex))
+		RaftDebug("server", rf.me, "update commitIndex as leader ", index, count, fmt.Sprintf("%+v", rf.matchedIndex))
 		//Figure8, section 5.4.2
 		if count > len(rf.peers)/2 && rf.logs[rf.logPosition(index)].Term == rf.currentTerm || count == len(rf.peers)-1 {
 			rf.commitIndex = index
-			//go rf.apply()
-			//println("server", rf.me, "update commitIndex as leader ", rf.commitIndex)
+			go func() {
+				rf.canApply <- struct{}{}
+			}()
+			RaftDebug("server", rf.me, "update commitIndex as leader ", rf.commitIndex)
 			return
 		}
 	}
@@ -677,7 +686,7 @@ func (rf *Raft) leaderState() {
 					if matchedIndex > rf.commitIndex {
 						rf.updateCommitIndex(matchedIndex)
 					}
-					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.matchedIndex[resp.server])
+					RaftDebug("server", rf.me, "appendEntries success to", resp.server, "matchedIndex", rf.matchedIndex[resp.server], rf.commitIndex)
 				})
 				return false
 			}
