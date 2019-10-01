@@ -13,6 +13,20 @@ type startReq struct {
 }
 
 func (rf *Raft) Start(command interface{}) (int, int, bool, int) {
+	//rf.mu.Lock()
+	//defer 	rf.mu.Unlock()
+	//term := rf.currentTerm
+	//leader := rf.leader
+	//role := rf.role
+	//index := rf.logIndex(len(rf.logs))
+	//if role != RaftLeader {
+	//	rf.mu.Unlock()
+	//	return index, term, false, leader
+	//}
+	//rf.logs = append(rf.logs, RaftLogEntry{command, term})
+	//rf.persist()
+	//rf.sendAppendEntriesOrInstallSnapshot()
+	//return index, term, true, rf.me
 	req := startReq{
 		command,
 		&startReply{

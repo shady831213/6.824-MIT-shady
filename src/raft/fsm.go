@@ -233,7 +233,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	}
 	if req.args.PrevLogIndex == rf.snapshot.Index && req.args.PrevLogTerm != rf.snapshot.Term {
 		req.reply.Success = false
-		req.reply.ConflictIndex = rf.snapshot.Index
+		req.reply.ConflictIndex = rf.snapshot.Index + 1
 		req.reply.ConflictTerm = rf.snapshot.Term
 		return
 	}
@@ -305,13 +305,13 @@ func (rf *Raft) installSnapshot(req *installSnapshotReq) {
 		//println("server", rf.me, "make snapshot though installSnapshot rpc")
 		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
 		//println("server", rf.me, "make snapshot though installSnapshot rpc")
-	}
-	if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
-		fmt.Printf("snapshot to be installed: %+v\n", req.args)
-		println()
-		fmt.Printf("snapshot: %+v\n", rf.snapshot)
-		println()
-		panic(fmt.Sprint("server ", rf.me, "installSnapshot term conflict from ", req.args.LeaderId, rf.snapshot.Term, req.args.LastIncludedTerm))
+	} else if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
+		//fmt.Printf("snapshot to be installed: %+v\n", req.args)
+		//println()
+		//fmt.Printf("snapshot: %+v\n", rf.snapshot)
+		//println()
+		//panic(fmt.Sprint("server ", rf.me, "installSnapshot term conflict from ", req.args.LeaderId, rf.snapshot.Term, req.args.LastIncludedTerm))
+		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
 	}
 	//update commitIndex
 	if req.args.LastIncludedIndex > rf.commitIndex {
@@ -643,11 +643,11 @@ func (rf *Raft) leaderState() {
 				req.reply.leader = rf.me
 				req.reply.role = RaftLeader
 				req.reply.index = rf.logIndex(len(rf.logs))
+				close(req.done)
 				rf.logs = append(rf.logs, RaftLogEntry{req.command, rf.currentTerm})
 				rf.persist()
-				close(req.done)
+				rf.sendAppendEntriesOrInstallSnapshot()
 			})
-			rf.sendAppendEntriesOrInstallSnapshot()
 			return false
 		},
 		snapshotReqAction: func(req *snapshotReq) bool {

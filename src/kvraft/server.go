@@ -19,7 +19,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type OPCode string
 
 const (
@@ -71,6 +70,7 @@ type KVRPCResp struct {
 	err         Err
 	value       string
 }
+
 /*
 	rpc                             issue                         commit
 -----------------------------------------------------------------------------------
@@ -182,14 +182,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	kv.issueing <- issue
 	<-issue.done
-	DPrintf("reply NotLeader done me: %d %+v", kv.me, issue.op)
+	DPrintf("reply PutAppend done me: %d %+v", kv.me, issue.op)
 }
 
 func (kv *KVServer) issue(item KVRPCIssueItem) {
 	if !item.preIssueCheck() {
 		return
 	}
-	if _,isLeader,leader := kv.rf.GetState();!isLeader{
+
+	if _, isLeader, leader := kv.rf.GetState(); !isLeader {
 		item.wrongLeaderHandler(leader)
 		return
 
@@ -201,9 +202,9 @@ func (kv *KVServer) issue(item KVRPCIssueItem) {
 			make(chan struct{}),
 		},
 	}
+	DPrintf("Waiting commitProcess me: %d %+v", kv.me, item.op)
 	kv.committing <- commit
 	kv.rf.Start(*item.op)
-	DPrintf("Waiting commitProcess me: %d %+v", kv.me, item.op)
 	<-commit.done
 }
 
