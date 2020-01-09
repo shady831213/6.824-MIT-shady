@@ -35,38 +35,54 @@ const (
 type Err string
 
 type JoinArgs struct {
+	ClerkId int64
+	SeqId   int
 	Servers map[int][]string // new GID -> servers mappings
 }
 
 type JoinReply struct {
+	Leader      int
+	Server      int
 	WrongLeader bool
 	Err         Err
 }
 
 type LeaveArgs struct {
+	ClerkId int64
+	SeqId   int
 	GIDs []int
 }
 
 type LeaveReply struct {
+	Leader      int
+	Server      int
 	WrongLeader bool
 	Err         Err
 }
 
 type MoveArgs struct {
+	ClerkId int64
+	SeqId   int
 	Shard int
 	GID   int
 }
 
 type MoveReply struct {
+	Leader      int
+	Server      int
 	WrongLeader bool
 	Err         Err
 }
 
 type QueryArgs struct {
+	ClerkId int64
+	SeqId   int
 	Num int // desired config number
 }
 
 type QueryReply struct {
+	Leader      int
+	Server      int
 	WrongLeader bool
 	Err         Err
 	Config      Config

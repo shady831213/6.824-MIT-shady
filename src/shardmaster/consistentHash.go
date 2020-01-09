@@ -2,20 +2,23 @@ package shardmaster
 
 import (
 	"hash"
-	"math/big"
 	"strconv"
 )
 
 type CHash struct {
-	vnodeNum    int
-	nodeTree    *rbt
-	nodeMap     map[string][]uint
-	clientCache map[string]string
-	hashFn      hash.Hash
+	vnodeNum int
+	nodeTree *rbt
+	nodeMap  map[string][]uint
+	hashFn   hash.Hash
 }
 
 func NewCHash(hashFn hash.Hash, vnodeNum int) *CHash {
 	h := new(CHash)
+	h.Init(hashFn, vnodeNum)
+	return h
+}
+
+func (h *CHash) Init(hashFn hash.Hash, vnodeNum int) *CHash {
 	h.hashFn = hashFn
 	h.nodeTree = newRBT()
 	if vnodeNum < 1 {
@@ -23,7 +26,6 @@ func NewCHash(hashFn hash.Hash, vnodeNum int) *CHash {
 	}
 	h.vnodeNum = vnodeNum
 	h.nodeMap = make(map[string][]uint)
-	h.clientCache = make(map[string]string)
 	return h
 }
 
@@ -31,20 +33,23 @@ func (h CHash) doHash(key string) uint {
 	h.hashFn.Reset()
 	buf := []byte(key)
 	h.hashFn.Write(buf)
+	for i:=0;i<10;i++ {
+		s := h.hashFn.Sum(nil)
+		h.hashFn.Reset()
+		h.hashFn.Write(s)
+	}
 	sum := h.hashFn.Sum(nil)
-	v := new(big.Int).SetBytes(sum)
-	v.Mod(v, big.NewInt(1<<32))
-	return uint(v.Uint64())
+	return uint(sum[3])<<24 | uint(sum[2])<<16 | uint(sum[1])<<8 | uint(sum[0])
 }
 
 func (h *CHash) addOneNode(key string, id int) {
-	hashValue := h.doHash(key + "#" + strconv.Itoa(id))
-	nodes, ok := h.nodeMap[key]
-	if !ok || nodes == nil {
-		h.nodeMap[key] = make([]uint, h.vnodeNum)
-		nodes = h.nodeMap[key]
+	subKey := key + "#" + strconv.Itoa(id)
+	hashValue := h.doHash(subKey)
+	for s := h.nodeTree.Search(hashValue); !h.nodeTree.IsNil(s); s = h.nodeTree.Search(hashValue){
+		subKey = subKey + "#" + strconv.Itoa(id)
+		hashValue = h.doHash(subKey)
 	}
-	nodes[id] = hashValue
+	h.nodeMap[key][id] = hashValue
 	h.nodeTree.Insert(newRBTNode(hashValue, key))
 }
 
@@ -52,14 +57,18 @@ func (h *CHash) removeOneNode(key string, id int) {
 	h.nodeTree.Delete(h.nodeMap[key][id])
 }
 
-func (h *CHash) AddNode(key string) *CHash {
-	if _, ok := h.nodeMap[key]; ok {
-		panic(key + " exists, can not be add!")
+func (h *CHash) AddNode(key string, weight int) *CHash {
+	if weight < 1 {
+		panic("weight require at least 1!")
 	}
-	for i := 0; i < h.vnodeNum; i++ {
+
+	if _, ok := h.nodeMap[key]; ok {
+		return h
+	}
+	h.nodeMap[key] = make([]uint, weight*h.vnodeNum)
+	for i := 0; i < weight*h.vnodeNum; i++ {
 		h.addOneNode(key, i)
 	}
-	h.clientCache = make(map[string]string)
 	return h
 }
 
@@ -71,26 +80,18 @@ func (h *CHash) RemoveNode(key string) *CHash {
 		h.removeOneNode(key, i)
 	}
 	delete(h.nodeMap, key)
-	h.clientCache = make(map[string]string)
 	return h
 }
 
 func (h CHash) GetNode(key string) (result string) {
-	if v, ok := h.clientCache[key]; ok {
-		result = v
-		return
-	}
 	hashValue := h.doHash(key)
-	defer func() {
-		h.clientCache[key] = result
-	}()
-	if s := h.nodeTree.Search(hashValue); !h.nodeTree.IsNil(s) {
+	for s := h.nodeTree.Search(hashValue); !h.nodeTree.IsNil(s); {
 		result = s.payload.(string)
 		return
 	}
 	n := newRBTNode(hashValue, key)
 	h.nodeTree.Insert(n)
-	defer  h.nodeTree.Delete(hashValue)
+	defer h.nodeTree.Delete(hashValue)
 	s := h.nodeTree.Successor(n, nil)
 	if h.nodeTree.IsNil(s) {
 		result = h.nodeTree.Min(nil).payload.(string)

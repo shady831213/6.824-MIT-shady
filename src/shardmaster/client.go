@@ -5,13 +5,16 @@ package shardmaster
 //
 
 import "labrpc"
-import "time"
 import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	leaderIndex int
+	curSeqId    int
+	id          int64
+	serverIds   []int
 }
 
 func nrand() int64 {
@@ -25,77 +28,137 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.serverIds = make([]int, len(servers))
+	for i := range ck.serverIds {
+		ck.serverIds[i] = -1
+	}
+	ck.leaderIndex = 0
+	ck.curSeqId = 0
+	ck.id = nrand()
 	return ck
 }
 
-func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardMaster.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return reply.Config
-			}
+func (ck *Clerk) nextLeaderIndex() {
+	nextIndex := int(nrand() % int64((len(ck.servers))))
+	for ;nextIndex == ck.leaderIndex; nextIndex = int(nrand() % int64((len(ck.servers)))){}
+	ck.leaderIndex = nextIndex
+}
+
+func (ck *Clerk) getServerIndex(serverId int) int {
+	for i, v := range ck.serverIds {
+		if v == serverId {
+			return i
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
+	return -1
+}
+
+func (ck *Clerk) leadServer() *labrpc.ClientEnd {
+	return ck.servers[ck.leaderIndex]
+}
+
+func (ck *Clerk) Query(num int) Config {
+	// Your code here.
+	// You will have to modify this function.
+
+	var reply *QueryReply
+	var ok bool
+	req := func() {
+		reply = &QueryReply{}
+		args := QueryArgs{ck.id, ck.curSeqId, num}
+		DPrintf("Query req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
+		ok = ck.leadServer().Call("ShardMaster.Query", &args, reply)
+		DPrintf("Done Query req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
+		if ok && ck.getServerIndex(reply.Server) < 0 {
+			ck.serverIds[ck.leaderIndex] = reply.Server
+		}
+	}
+	for req(); !ok || reply.WrongLeader; req() {
+		if !ok || reply.Leader < 0 {
+			ck.nextLeaderIndex()
+		} else if index := ck.getServerIndex(reply.Leader); index < 0 {
+			ck.nextLeaderIndex()
+		} else {
+			ck.leaderIndex = index
+		}
+	}
+	ck.curSeqId ++
+	return reply.Config
+
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardMaster.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+	// You will have to modify this function.
+	var reply *JoinReply
+	var ok bool
+	req := func() {
+		reply = &JoinReply{}
+		args := JoinArgs{ck.id, ck.curSeqId, servers}
+		DPrintf("Join req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
+		ok = ck.leadServer().Call("ShardMaster.Join", &args, reply)
+		DPrintf("Join PutAppend req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
+		if ok && ck.getServerIndex(reply.Server) < 0 {
+			ck.serverIds[ck.leaderIndex] = reply.Server
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
+	for req(); !ok || reply.WrongLeader; req() {
+		if !ok || reply.Leader < 0 {
+			ck.nextLeaderIndex()
+		} else if index := ck.getServerIndex(reply.Leader); index < 0 {
+			ck.nextLeaderIndex()
+		} else {
+			ck.leaderIndex = index
+		}
+	}
+	ck.curSeqId ++
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardMaster.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+	var reply *LeaveReply
+	var ok bool
+	req := func() {
+		reply = &LeaveReply{}
+		args := LeaveArgs{ck.id, ck.curSeqId, gids}
+		DPrintf("Leave req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
+		ok = ck.leadServer().Call("ShardMaster.Leave", &args, reply)
+		DPrintf("Leave PutAppend req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
+		if ok && ck.getServerIndex(reply.Server) < 0 {
+			ck.serverIds[ck.leaderIndex] = reply.Server
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
+	for req(); !ok || reply.WrongLeader; req() {
+		if !ok || reply.Leader < 0 {
+			ck.nextLeaderIndex()
+		} else if index := ck.getServerIndex(reply.Leader); index < 0 {
+			ck.nextLeaderIndex()
+		} else {
+			ck.leaderIndex = index
+		}
+	}
+	ck.curSeqId ++
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardMaster.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+	var reply *MoveReply
+	var ok bool
+	req := func() {
+		reply = &MoveReply{}
+		args := MoveArgs{ck.id, ck.curSeqId, shard, gid}
+		DPrintf("Move req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
+		ok = ck.leadServer().Call("ShardMaster.Move", &args, reply)
+		DPrintf("Move PutAppend req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
+		if ok && ck.getServerIndex(reply.Server) < 0 {
+			ck.serverIds[ck.leaderIndex] = reply.Server
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
+	for req(); !ok || reply.WrongLeader; req() {
+		if !ok || reply.Leader < 0 {
+			ck.nextLeaderIndex()
+		} else if index := ck.getServerIndex(reply.Leader); index < 0 {
+			ck.nextLeaderIndex()
+		} else {
+			ck.leaderIndex = index
+		}
+	}
+	ck.curSeqId ++
 }

@@ -8,9 +8,9 @@ import (
 
 func TestCHashAddAndRemove(t *testing.T) {
 	chash := NewCHash(md5.New(), 3)
-	chash.AddNode(strconv.Itoa(8))
-	chash.AddNode(strconv.Itoa(1))
-	chash.AddNode(strconv.Itoa(4))
+	chash.AddNode(strconv.Itoa(8), 1)
+	chash.AddNode(strconv.Itoa(1), 1)
+	chash.AddNode(strconv.Itoa(4), 1)
 	allNodes := make([]uint, 0)
 	chash.nodeTree.PreOrderWalk(nil, func(i *rbt, node *rbTreeNode) bool {
 		allNodes = append(allNodes, node.key)
@@ -44,6 +44,7 @@ func checkCHashBalance(t *testing.T, chash *CHash, exp map[string][]string) map[
 		}
 		groups[g] = append(groups[g], strconv.Itoa(i))
 	}
+	//t.Log(fmt.Sprintf("%+v", groups))
 	for k, v := range exp {
 		for i, vv := range v {
 			if groups[k][i] != vv {
@@ -56,31 +57,31 @@ func checkCHashBalance(t *testing.T, chash *CHash, exp map[string][]string) map[
 
 func TestCHashBalance(t *testing.T) {
 	chash := NewCHash(md5.New(), 6)
-	chash.AddNode(strconv.Itoa(8))
-	chash.AddNode(strconv.Itoa(1))
-	chash.AddNode(strconv.Itoa(4))
+	chash.AddNode(strconv.Itoa(8), 1)
+	chash.AddNode(strconv.Itoa(1), 1)
+	chash.AddNode(strconv.Itoa(4), 1)
 	checkCHashBalance(t, chash, map[string][]string{
-		"8": {"1", "3", "7"},
-		"4": {"2", "6", "8", "9"},
-		"1": {"0", "4", "5"},
+		"8": {"1", "3", "5"},
+		"4": {"0", "4","6", "7", "9"},
+		"1": {"2", "8"},
 	})
 	//add new node
-	chash.AddNode(strconv.Itoa(9))
+	chash.AddNode(strconv.Itoa(9), 1)
 	checkCHashBalance(t, chash, map[string][]string{
-		"8": {"1", "3"},
-		"4": {"2", "6", "9"},
-		"1": {"0", "4", "5"},
-		"9": {"7", "8"},
+		"8": {"3", "5"},
+		"4": {"0", "4","6", "9"},
+		"1": {"2", "8"},
+		"9": {"1", "7"},
 	})
 	//delete 2 nodes
 	chash.RemoveNode(strconv.Itoa(4))
 	checkCHashBalance(t, chash, map[string][]string{
-		"8": {"1", "2", "3", "6", "9"},
-		"1": {"0", "4", "5"},
-		"9": {"7", "8"},})
+		"8": {"3", "4", "5"},
+		"1": {"2", "6", "8"},
+		"9": {"0", "1", "7", "9"},})
 	chash.RemoveNode(strconv.Itoa(1))
 	checkCHashBalance(t, chash, map[string][]string{
-		"8": {"1", "2", "3", "4", "5", "6", "9"},
-		"9": {"0", "7", "8"},
+		"9": {"0", "1", "2", "6", "7", "8", "9"},
+		"8": {"3", "4", "5"},
 	})
 }

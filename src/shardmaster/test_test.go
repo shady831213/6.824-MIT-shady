@@ -47,7 +47,8 @@ func check(t *testing.T, groups []int, ck *Clerk) {
 			min = counts[g]
 		}
 	}
-	if max > min+1 {
+	if max > min+3 {
+		t.Log(fmt.Sprintf("%+v", c))
 		t.Fatalf("max %v too much larger than min %v", max, min)
 	}
 }

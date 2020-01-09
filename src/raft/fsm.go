@@ -68,6 +68,8 @@ func (rf *Raft) sendOneAppendEntries(server int,
 	commitIndex int,
 	entries []RaftLogEntry) {
 	RaftDebug("server", rf.me, "before send appendEntries to", server)
+	//println("server", rf.me,"before send appendEntries to", server, "entries", fmt.Sprintf("%+v", entries))
+
 	args := AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     rf.me,
@@ -255,6 +257,7 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	rf.persist()
 	//append new entries
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "logs", rf.logs, "entries", req.args.Entries)
+	//println("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "logs", rf.logs, "entries", fmt.Sprintf("%+v", req.args.Entries))
 
 	//update commitIndex
 	if req.args.LeaderCommit > rf.commitIndex {
