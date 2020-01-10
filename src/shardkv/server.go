@@ -1,18 +1,65 @@
 package shardkv
 
+import (
+	"bytes"
+	"context"
+	"labgob"
+	"labrpc"
+	"raft"
+	"shardmaster"
+	"sync"
+)
 
-// import "shardmaster"
-import "labrpc"
-import "raft"
-import "sync"
-import "labgob"
+type OPCode string
 
+const (
+	GET    = "Get"
+	PUT    = "Put"
+	APPEND = "Append"
+)
 
+type ClerkTrackAction int
+
+const (
+	_ ClerkTrackAction = iota
+	ClerkOK
+	ClerkIgnore
+	ClerkRetry
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpCode   OPCode
+	ServerId int
+	ClerkId  int64
+	SeqId    int
+	Key      string
+	Value    string
+}
+
+type kvRPCItem struct {
+	op   *Op
+	resp func(KVRPCResp)
+	done chan struct{}
+}
+
+type KVRPCIssueItem struct {
+	kvRPCItem
+	preIssueCheck      func() bool
+	wrongLeaderHandler func(int)
+}
+
+type KVRPCCommitItem struct {
+	kvRPCItem
+}
+
+type KVRPCResp struct {
+	wrongLeader bool
+	leader      int
+	err         Err
+	value       string
 }
 
 type ShardKV struct {
@@ -26,15 +73,277 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	sm           *shardmaster.Clerk
+	booting      bool
+	DB           map[string]string
+	ClerkTrack   map[int64]int
+	ctx          context.Context
+	cancel       func()
+	issueing     chan KVRPCIssueItem
+	committing   chan KVRPCCommitItem
+	pendingIndex int
 }
 
-
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	issue := KVRPCIssueItem{
+		kvRPCItem{&Op{GET, kv.me, args.ClerkId, args.SeqId, args.Key, ""},
+			func(resp KVRPCResp) {
+				reply.Server = kv.me
+				reply.Err = resp.err
+				reply.WrongLeader = resp.wrongLeader
+				reply.Leader = resp.leader
+				reply.Value = resp.value
+				DPrintf("reply Get me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+			},
+			make(chan struct{})},
+
+		func() bool {
+			if ok := kv.checkGroup();!ok {
+				reply.Err = ErrWrongGroup
+				DPrintf("wrongGroup Get me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+				return false
+			}
+			return true
+		},
+		func(leader int) {
+			reply.Server = kv.me
+			reply.WrongLeader = true
+			reply.Leader = leader
+			DPrintf("NotLeader Get me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+		},
+	}
+	kv.issueing <- issue
+	<-issue.done
+	DPrintf("reply Get done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
+}
+
+func (kv *ShardKV) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	v, ok := kv.ClerkTrack[clerkId]
+	DPrintf("checkClerkTrack me: %d gid: %d clerkId:%v, ok:%v seqId:%d, v:%d, %v", kv.me, kv.gid, clerkId, ok, sedId, v, kv.ClerkTrack)
+	//when restart
+	if !ok && sedId > 0 || sedId > v+1 {
+		return ClerkRetry
+	}
+	//for restart corner case
+	if !ok && sedId == 0 || sedId == v+1 {
+		if kv.booting {
+			kv.booting = false
+			return ClerkRetry
+		}
+		return ClerkOK
+	}
+	return ClerkIgnore
+}
+
+func (kv *ShardKV) checkGroup() bool {
+	config := kv.sm.Query(-1)
+	_, ok := config.Groups[kv.gid]
+	return ok
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	issue := KVRPCIssueItem{
+		kvRPCItem{&Op{(OPCode)(args.Op), kv.me, args.ClerkId, args.SeqId, args.Key, args.Value},
+			func(resp KVRPCResp) {
+				reply.Server = kv.me
+				reply.Err = resp.err
+				reply.WrongLeader = resp.wrongLeader
+				reply.Leader = resp.leader
+				DPrintf("reply PutAppend me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+			},
+			make(chan struct{})},
+
+		func() bool {
+			switch kv.checkClerkTrack(args.ClerkId, args.SeqId) {
+			case ClerkIgnore:
+				DPrintf("ignore PutAppend me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+				return false
+			case ClerkRetry:
+				reply.WrongLeader = true
+				reply.Leader = -1
+				DPrintf("retry PutAppend me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+				return false
+			}
+			if ok := kv.checkGroup();!ok {
+				reply.Err = ErrWrongGroup
+				DPrintf("wrongGroup PutAppend me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+				return false
+			}
+			return true
+		},
+
+		func(leader int) {
+			reply.Server = kv.me
+			reply.WrongLeader = true
+			reply.Leader = leader
+			DPrintf("NotLeader PutAppend me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+		},
+	}
+	kv.issueing <- issue
+	<-issue.done
+	DPrintf("reply PutAppend done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
+}
+
+func (kv *ShardKV) issue(item KVRPCIssueItem) {
+	if !item.preIssueCheck() {
+		return
+	}
+
+	index, _, isLeader, leader := kv.rf.Start(*item.op)
+	if !isLeader {
+		item.wrongLeaderHandler(leader)
+		return
+
+	}
+	commit := KVRPCCommitItem{
+		kvRPCItem{
+			item.op,
+			item.resp,
+			make(chan struct{}),
+		},
+	}
+	kv.mu.Lock()
+	kv.pendingIndex = index
+	kv.mu.Unlock()
+	kv.committing <- commit
+	DPrintf("Waiting commitProcess me: %d gid: %d %+v", kv.me, kv.gid, item.op)
+	<-commit.done
+}
+
+func (kv *ShardKV) issueProcess() {
+	for {
+		select {
+		case item := <-kv.issueing:
+			kv.issue(item)
+			item.done <- struct{}{}
+			DPrintf("issue done me: %d gid: %d %+v", kv.me, kv.gid, item.op)
+			break
+		case <-kv.ctx.Done():
+			return
+		}
+	}
+}
+
+func (kv *ShardKV) execute(op *Op) (string, Err) {
+	switch op.OpCode {
+	case PUT:
+		kv.DB[op.Key] = op.Value
+		break
+	case GET:
+		v, exist := kv.DB[op.Key]
+		if !exist {
+			return "", ErrNoKey
+		}
+		return v, OK
+	case APPEND:
+
+		if v, exist := kv.DB[op.Key]; !exist {
+			kv.DB[op.Key] = op.Value
+		} else {
+			kv.DB[op.Key] = v + op.Value
+		}
+		break
+	}
+	return "", OK
+}
+
+func (kv *ShardKV) servePendingRPC(apply *raft.ApplyMsg, err Err, value string) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if apply.CommandIndex == kv.pendingIndex {
+		item := <-kv.committing
+		op, ok := (apply.Command).(Op)
+		DPrintf("commitProcess me: %d gid: %d %+v %+v Index:%d", kv.me, kv.gid, op, item.op, apply.CommandIndex)
+		item.resp(KVRPCResp{
+			op.SeqId != item.op.SeqId || op.ClerkId != item.op.ClerkId || !ok || !apply.CommandValid,
+			op.ServerId,
+			err,
+			value,
+		})
+		close(item.done)
+		return
+	}
+	if apply.CommandIndex > kv.pendingIndex {
+		select {
+		case item := <-kv.committing:
+			DPrintf("commitProcess me: %d gid: %d  %+v Index:%d", kv.me, kv.gid, item.op, apply.CommandIndex)
+			item.resp(KVRPCResp{
+				true,
+				kv.me,
+				err,
+				value,
+			})
+			close(item.done)
+
+		default:
+
+		}
+	}
+
+}
+
+func (kv *ShardKV) updateClerkTrack(clerkId int64, seqId int) {
+	kv.mu.Lock()
+	kv.ClerkTrack[clerkId] = seqId
+	v, ok := kv.ClerkTrack[clerkId]
+	DPrintf("updateTrack me: %d gid: %d clerkId:%v seqId:%v ok:%v track:%v %v", kv.me, kv.gid, clerkId, seqId, ok, v, kv.ClerkTrack)
+	kv.mu.Unlock()
+}
+
+func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	if e := d.Decode(&kv.DB); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&kv.ClerkTrack); e != nil {
+		panic(e)
+	}
+}
+
+func (kv *ShardKV) encodeSnapshot() []byte {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	s := new(bytes.Buffer)
+	e := labgob.NewEncoder(s)
+	e.Encode(kv.DB)
+	e.Encode(kv.ClerkTrack)
+	return s.Bytes()
+}
+
+func (kv *ShardKV) commitProcess() {
+	for {
+		select {
+		case apply := <-kv.applyCh:
+			var err Err
+			var value string
+			if apply.CommandValid {
+				op, _ := (apply.Command).(Op)
+				value, err = kv.execute(&op)
+				kv.updateClerkTrack(op.ClerkId, op.SeqId)
+				DPrintf("server%d gid%d apply %+v Index:%d", kv.me, kv.gid, op, apply.CommandIndex)
+			}
+			if apply.Snapshot {
+				snapshot, _ := (apply.Command).([]byte)
+				DPrintf("install snapshot before decode me: %d gid: %d %+v", kv.me, kv.gid, kv.DB)
+				kv.decodeSnapshot(snapshot)
+			} else {
+				kv.servePendingRPC(&apply, err, value)
+				if apply.StageSize >= kv.maxraftstate && kv.maxraftstate > 0 {
+					DPrintf("make snapshot me: %d gid: %d Index:%d stageSize %d %+v", kv.me, kv.gid, apply.CommandIndex, apply.StageSize, kv.DB)
+					kv.rf.Snapshot(apply.CommandIndex, kv.encodeSnapshot())
+				}
+			}
+			DPrintf("server%d gid%d apply Index:%d done", kv.me, kv.gid, apply.CommandIndex)
+			break
+		case <-kv.ctx.Done():
+			return
+		}
+	}
 }
 
 //
@@ -44,10 +353,21 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // turn off debug output from this instance.
 //
 func (kv *ShardKV) Kill() {
+	DPrintf("server%d gid%d killed", kv.me, kv.gid)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	kv.cancel()
+	select {
+	case item := <-kv.issueing:
+		close(item.done)
+	default:
+	}
+	select {
+	case item := <-kv.committing:
+		close(item.done)
+	default:
+	}
 }
-
 
 //
 // servers[] contains the ports of the servers in this group.
@@ -90,13 +410,23 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.masters = masters
 
 	// Your initialization code here.
-
-	// Use something like this to talk to the shardmaster:
-	// kv.mck = shardmaster.MakeClerk(kv.masters)
+	kv.sm = shardmaster.MakeClerk(masters)
+	kv.booting = true
+	kv.DB = make(map[string]string)
+	kv.ClerkTrack = make(map[int64]int)
+	kv.issueing = make(chan KVRPCIssueItem)
+	kv.committing = make(chan KVRPCCommitItem, 1)
+	kv.ctx, kv.cancel = context.WithCancel(context.Background())
+	kv.pendingIndex = 0
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
+	// You may need initialization code here.
+	go kv.commitProcess()
+	go kv.issueProcess()
+	DPrintf("server%d start", kv.me)
+	// Use something like this to talk to the shardmaster:
+	// kv.mck = shardmaster.MakeClerk(kv.masters)
 
 	return kv
 }

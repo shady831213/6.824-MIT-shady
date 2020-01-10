@@ -95,6 +95,7 @@ func (cfg *config) checklogs() {
 					raft, cfg.maxraftstate)
 			}
 			if cfg.maxraftstate < 0 && snap > 0 {
+				fmt.Printf("group %d, save %d, snapshot %+v\n", gi, i, snap)
 				cfg.t.Fatalf("maxraftstate is -1, but snapshot is non-empty!")
 			}
 		}

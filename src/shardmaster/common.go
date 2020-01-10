@@ -1,5 +1,16 @@
 package shardmaster
 
+import "log"
+
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -38,7 +49,6 @@ type ArgsBase struct {
 	ClerkId int64
 	SeqId   int
 }
-
 
 type ReplyBase struct {
 	Leader      int
@@ -82,5 +92,5 @@ type QueryArgs struct {
 
 type QueryReply struct {
 	ReplyBase
-	Config      Config
+	Config Config
 }

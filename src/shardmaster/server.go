@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
-	"log"
 	"raft"
 	"strconv"
 )
@@ -13,14 +12,6 @@ import "labrpc"
 import "sync"
 import "labgob"
 
-const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
 
 type OPCode string
 

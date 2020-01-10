@@ -8,7 +8,9 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "labrpc"
+import (
+	"labrpc"
+)
 import "crypto/rand"
 import "math/big"
 import "shardmaster"
@@ -40,6 +42,9 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderIndex int
+	curSeqId    map[int]int
+	id          int64
 }
 
 //
@@ -56,7 +61,25 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.leaderIndex = 0
+	ck.curSeqId = make(map[int]int)
+	ck.id = nrand()
 	return ck
+}
+
+func (ck *Clerk) getGroup(key string) []string {
+	shard := key2shard(key)
+	gid := ck.config.Shards[shard]
+	return ck.config.Groups[gid]
+}
+
+func (ck *Clerk) checkServer(key string, server string) bool {
+	for _, v := range ck.getGroup(key) {
+		if v == server {
+			return true
+		}
+	}
+	return false
 }
 
 //
@@ -68,17 +91,22 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
-
+	args.ClerkId = ck.id
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.SeqId = ck.curSeqId[gid]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
+				DPrintf("Get req to %s, %+v", servers[si], args)
 				ok := srv.Call("ShardKV.Get", &args, &reply)
+				DPrintf("Done Get req to %s, %+v", servers[si], args)
 				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
+					ck.curSeqId[gid] ++
+					DPrintf("Success Get req to %s, %+v, config:%+v", servers[si], args, ck.config)
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
@@ -90,7 +118,6 @@ func (ck *Clerk) Get(key string) string {
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
-
 	return ""
 }
 
@@ -103,17 +130,21 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.ClerkId = ck.id
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.SeqId = ck.curSeqId[gid]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
+				DPrintf("PutAppend req to %s, %+v", servers[si], args)
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+				DPrintf("Done PutAppend req to %s, %+v", servers[si], args)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
+					ck.curSeqId[gid] ++
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {

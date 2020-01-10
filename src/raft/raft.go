@@ -174,12 +174,17 @@ func (rf *Raft) persist() {
 	stateE.Encode(rf.votedFor)
 	stateE.Encode(rf.logs)
 
-	snapshot := new(bytes.Buffer)
-	snapshotE := labgob.NewEncoder(snapshot)
-	snapshotE.Encode(rf.snapshot.Index)
-	snapshotE.Encode(rf.snapshot.Term)
-	snapshotE.Encode(rf.snapshot.Data)
-	rf.persister.SaveStateAndSnapshot(state.Bytes(), snapshot.Bytes())
+	if rf.snapshot.Term > 0 || rf.snapshot.Index > 0 {
+		snapshot := new(bytes.Buffer)
+		snapshotE := labgob.NewEncoder(snapshot)
+		snapshotE.Encode(rf.snapshot.Index)
+		snapshotE.Encode(rf.snapshot.Term)
+		snapshotE.Encode(rf.snapshot.Data)
+		rf.persister.SaveStateAndSnapshot(state.Bytes(), snapshot.Bytes())
+	} else {
+		rf.persister.SaveRaftState(state.Bytes())
+
+	}
 }
 
 //
@@ -277,7 +282,7 @@ func (rf *Raft) apply() {
 			lastApplied = rf.snapshot.Index + 1
 		}
 		if lastApplied <= rf.commitIndex {
-			commitEntris := rf.logs[rf.logPosition(lastApplied):rf.logPosition(rf.commitIndex)+1]
+			commitEntris := rf.logs[rf.logPosition(lastApplied) : rf.logPosition(rf.commitIndex)+1]
 			for i, e := range commitEntris {
 				if i == len(commitEntris)-1 {
 					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command, lastApplied + i, rf.persister.RaftStateSize(), false})
