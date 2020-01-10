@@ -338,7 +338,6 @@ func (sm *ShardMaster) allocConfig() *Config {
 	return &sm.configs[num]
 }
 
-//fixme:need refactory
 func (sm *ShardMaster) execute(op *Op) (interface{}, Err) {
 	switch op.OpCode {
 	case JOIN:

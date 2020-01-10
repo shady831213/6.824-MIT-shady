@@ -65,7 +65,7 @@ func (ck *Clerk) Query(num int) Config {
 	var ok bool
 	req := func() {
 		reply = &QueryReply{}
-		args := QueryArgs{ck.id, ck.curSeqId, num}
+		args := QueryArgs{ArgsBase{ck.id, ck.curSeqId}, num}
 		DPrintf("Query req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
 		ok = ck.leadServer().Call("ShardMaster.Query", &args, reply)
 		DPrintf("Done Query req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
@@ -93,7 +93,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	var ok bool
 	req := func() {
 		reply = &JoinReply{}
-		args := JoinArgs{ck.id, ck.curSeqId, servers}
+		args := JoinArgs{ArgsBase{ck.id, ck.curSeqId}, servers}
 		DPrintf("Join req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
 		ok = ck.leadServer().Call("ShardMaster.Join", &args, reply)
 		DPrintf("Join PutAppend req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
@@ -118,7 +118,7 @@ func (ck *Clerk) Leave(gids []int) {
 	var ok bool
 	req := func() {
 		reply = &LeaveReply{}
-		args := LeaveArgs{ck.id, ck.curSeqId, gids}
+		args := LeaveArgs{ArgsBase{ck.id, ck.curSeqId}, gids}
 		DPrintf("Leave req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
 		ok = ck.leadServer().Call("ShardMaster.Leave", &args, reply)
 		DPrintf("Leave PutAppend req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
@@ -143,7 +143,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 	var ok bool
 	req := func() {
 		reply = &MoveReply{}
-		args := MoveArgs{ck.id, ck.curSeqId, shard, gid}
+		args := MoveArgs{ArgsBase{ck.id, ck.curSeqId}, shard, gid}
 		DPrintf("Move req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
 		ok = ck.leadServer().Call("ShardMaster.Move", &args, reply)
 		DPrintf("Move PutAppend req to %d, %+v", ck.serverIds[ck.leaderIndex], args)
