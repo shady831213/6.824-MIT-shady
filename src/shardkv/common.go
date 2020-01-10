@@ -26,7 +26,7 @@ const (
 	ErrWrongGroup = "ErrWrongGroup"
 )
 
-const NOLEADER  = "NoLeader"
+const NOLEADER = "NoLeader"
 
 type Err string
 
@@ -61,6 +61,20 @@ type GetReply struct {
 	WrongLeader bool
 	Err         Err
 	Value       string
+	Leader      int
+	Server      int
+}
+
+// Put or Append
+type MigrateArgs struct {
+	Value   map[string]string
+	ClerkId int64
+	SeqId   int
+}
+
+type MigrateReply struct {
+	WrongLeader bool
+	Err         Err
 	Leader      int
 	Server      int
 }

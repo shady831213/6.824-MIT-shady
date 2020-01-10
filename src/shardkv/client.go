@@ -42,9 +42,8 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
-	leaderIndex int
-	curSeqId    map[int]int
-	id          int64
+	curSeqId map[int]int
+	id       int64
 }
 
 //
@@ -61,7 +60,6 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
-	ck.leaderIndex = 0
 	ck.curSeqId = make(map[int]int)
 	ck.id = nrand()
 	return ck
@@ -164,3 +162,32 @@ func (ck *Clerk) Put(key string, value string) {
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }
+
+//func (ck *Clerk) Migrate(gid int, config shardmaster.Config, value map[string]string) {
+//	args := MigrateArgs{}
+//	args.Value = value
+//	args.ClerkId = ck.id
+//
+//	for {
+//		args.SeqId = ck.curSeqId[gid]
+//		if servers, ok := config.Groups[gid]; ok {
+//			for si := 0; si < len(servers); si++ {
+//				srv := ck.make_end(servers[si])
+//				var reply PutAppendReply
+//				DPrintf("Migrate req to %s, %+v", servers[si], args)
+//				fmt.Printf("Migrate req to %s, %+v\n", servers[si], args)
+//				ok := srv.Call("ShardKV.Migrate", &args, &reply)
+//				DPrintf("Done Migrate req to %s, %+v", servers[si], args)
+//				fmt.Printf("Done Migrate req to %s, %+v\n", servers[si], args)
+//				if ok && reply.WrongLeader == false && reply.Err == OK {
+//					ck.curSeqId[gid] ++
+//					return
+//				}
+//				if ok && reply.Err == ErrWrongGroup {
+//					break
+//				}
+//			}
+//		}
+//		time.Sleep(100 * time.Millisecond)
+//	}
+//}
