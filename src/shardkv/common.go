@@ -14,7 +14,7 @@ import (
 // You will have to modify these definitions.
 //
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -72,6 +72,7 @@ type GetReply struct {
 
 type GetShardArgs struct {
 	Shard     int
+	Gid       int64
 	ConfigNum   int
 }
 

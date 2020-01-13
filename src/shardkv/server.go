@@ -3,7 +3,6 @@ package shardkv
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"labgob"
 	"labrpc"
 	"raft"
@@ -117,7 +116,7 @@ func (kv *ShardKV) checkGroup(key string) bool {
 	_, ok := kv.config.Groups[kv.gid]
 	if key != "" {
 		shard := key2shard(key)
-		return kv.config.Shards[shard] == kv.gid && ok
+		return (kv.config.Shards[shard] == kv.gid) && ok
 	}
 	return ok
 }
@@ -213,7 +212,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 	issue := KVRPCIssueItem{
-		kvRPCItem{&Op{GETSHARD, kv.me, -1, args.ConfigNum,
+		kvRPCItem{&Op{GETSHARD, kv.me, args.Gid, args.ConfigNum,
 			func() []byte {
 				s := new(bytes.Buffer)
 				e := labgob.NewEncoder(s)
@@ -226,22 +225,23 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				reply.Value = resp.value.(map[string]string)
-				DPrintf("reply GetMigrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
-				//fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+				DPrintf("reply GetShard me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+				//fmt.Printf("reply GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
 
 		func() bool {
 			kv.mu.Lock()
-			defer kv.mu.Lock()
-			if args.ConfigNum <= kv.config.Num {
+			defer kv.mu.Unlock()
+			if args.ConfigNum < kv.config.Num {
 				reply.WrongLeader = true
 				reply.Leader = -1
-				DPrintf("retry GetMigrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
-				//fmt.Printf("retry GetMigrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+				DPrintf("retry GetShard me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+				//fmt.Printf("retry GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 				return false
 			}
+			//fmt.Printf("get GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 			return true
 		},
 
@@ -249,15 +249,15 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 			reply.Server = kv.me
 			reply.WrongLeader = true
 			reply.Leader = leader
-			DPrintf("NotLeader GetMigrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
-			//fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+			DPrintf("NotLeader GetShard me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+			//fmt.Printf("NotLeader GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 		},
 	}
 	kv.issueing <- issue
 	<-issue.done
-	DPrintf("reply GetMigrate done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
-	//fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
+	DPrintf("reply GetShard done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
+	//fmt.Printf("reply GetShard done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
 }
 
 func (kv *ShardKV) UpdateShard(args UpdateShardArgs, reply *UpdateShardReply) {
@@ -273,7 +273,7 @@ func (kv *ShardKV) UpdateShard(args UpdateShardArgs, reply *UpdateShardReply) {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				DPrintf("reply Config me: %d gid: %d %+v", kv.me, kv.gid, args)
-				//fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+				////fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
@@ -286,14 +286,14 @@ func (kv *ShardKV) UpdateShard(args UpdateShardArgs, reply *UpdateShardReply) {
 			reply.WrongLeader = true
 			reply.Leader = leader
 			DPrintf("NotLeader Config me: %d gid: %d %+v", kv.me, kv.gid, args)
-			//fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+			////fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 		},
 	}
 	kv.issueing <- issue
 	<-issue.done
 	DPrintf("reply Config done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
-	//fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
+	////fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
 }
 
 func (kv *ShardKV) updateShard(config shardmaster.Config, value map[string]string) {
@@ -307,7 +307,7 @@ func (kv *ShardKV) updateShard(config shardmaster.Config, value map[string]strin
 		var reply UpdateShardReply
 		ok := false
 		DPrintf("updateShard req to %d, %+v", server, args)
-		fmt.Printf("updateShard req to %d, %+v\n", server, args)
+		//fmt.Printf("updateShard req to %d, %+v\n", server, args)
 		if server == kv.me {
 			ok = true
 			kv.UpdateShard(args, &reply)
@@ -315,7 +315,7 @@ func (kv *ShardKV) updateShard(config shardmaster.Config, value map[string]strin
 			ok = srv.Call("ShardKV.UpdateShard", &args, &reply)
 		}
 		DPrintf("Done updateShard req to %d, %+v", server, args)
-		fmt.Printf("Done updateShard req to %d, %+v\n", server, args)
+		//fmt.Printf("Done updateShard req to %d, %+v\n", server, args)
 		if ok && reply.WrongLeader == false {
 			return
 		}
@@ -337,7 +337,7 @@ func (kv *ShardKV) Config(args ConfigArgs, reply *ConfigReply) {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				DPrintf("reply Config me: %d gid: %d %+v", kv.me, kv.gid, args)
-				//fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+				////fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
@@ -350,14 +350,14 @@ func (kv *ShardKV) Config(args ConfigArgs, reply *ConfigReply) {
 			reply.WrongLeader = true
 			reply.Leader = leader
 			DPrintf("NotLeader Config me: %d gid: %d %+v", kv.me, kv.gid, args)
-			//fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+			////fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 		},
 	}
 	kv.issueing <- issue
 	<-issue.done
 	DPrintf("reply Config done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
-	//fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
+	////fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
 }
 
 func (kv *ShardKV) commitConfig(config shardmaster.Config) {
@@ -390,10 +390,11 @@ func (kv *ShardKV) commitConfig(config shardmaster.Config) {
 func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan struct{}) {
 	args := GetShardArgs{}
 	args.Shard = shard
-	//fmt.Printf("GetShard %d req me %d, gid %d\n", shard, kv.me, kv.gid)
+	args.Gid = int64(kv.gid)
 	kv.mu.Lock()
-	if kv.config.Shards[shard] == kv.gid || config.Shards[shard] != kv.gid || kv.config.Num == 0{
+	if kv.config.Shards[shard] == kv.gid || config.Shards[shard] != kv.gid || kv.config.Num == 0 {
 		kv.mu.Unlock()
+		//fmt.Printf("GetShard %d req to self me %d, gid %d\n", shard, kv.me, kv.gid)
 		done <- struct{}{}
 		return
 	}
@@ -403,18 +404,18 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 		args.ConfigNum = config.Num
 		kv.mu.Lock()
 		gid := kv.config.Shards[shard]
-		//fmt.Printf("GetShard %d req to gid %d me %d, gid %d\n", shard, gid, kv.me, kv.gid)
 		if servers, ok := kv.config.Groups[gid]; ok {
 			kv.mu.Unlock()
+			//fmt.Printf("GetShard %d req to gid %d me %d, gid %d\n", shard, gid, kv.me, kv.gid)
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
 				var reply GetShardReply
 				DPrintf("GetShard req to %s, %+v", servers[si], args)
 				//fmt.Printf("GetShard req to %s, %+v\n", servers[si], args)
 				ok := srv.Call("ShardKV.GetShard", &args, &reply)
-				DPrintf("Done GetShard req to %s, %+v", servers[si], args)
-				//fmt.Printf("Done GetShard req to %s, %+v\n", servers[si], args)
 				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
+					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
+					//fmt.Printf("Done GetShard req to %s, %+v\n", servers[si], args)
 					kv.updateShard(config, reply.Value)
 					done <- struct{}{}
 					return
@@ -431,7 +432,6 @@ func (kv *ShardKV) issue(item KVRPCIssueItem) {
 	if !item.preIssueCheck() {
 		return
 	}
-
 	index, _, isLeader, leader := kv.rf.Start(*item.op)
 	if !isLeader {
 		item.wrongLeaderHandler(leader)
@@ -524,6 +524,7 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 				value[k] = v
 			}
 		}
+		//fmt.Printf("excute GetShard me: %d gid: %d %+v\n", kv.me, kv.gid, op)
 		return value, OK
 	case UPDATESHARD:
 		value := make(map[string]string)
