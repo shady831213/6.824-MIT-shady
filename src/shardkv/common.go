@@ -1,6 +1,9 @@
 package shardkv
 
-import "log"
+import (
+	"log"
+	"shardmaster"
+)
 
 //
 // Sharded key/value server.
@@ -66,15 +69,37 @@ type GetReply struct {
 }
 
 // Put or Append
-type MigrateArgs struct {
-	Value   map[string]string
-	ClerkId int64
-	SeqId   int
+
+type GetShardArgs struct {
+	Shard     int
+	ConfigNum   int
 }
 
-type MigrateReply struct {
+type GetShardReply struct {
+	Value   map[string]string
 	WrongLeader bool
 	Err         Err
 	Leader      int
 	Server      int
 }
+
+type UpdateShardArgs struct {
+	ConfigNum int
+	Value map[string]string
+}
+
+type UpdateShardReply struct {
+	WrongLeader bool
+	Leader      int
+}
+
+type ConfigArgs struct {
+	Config shardmaster.Config
+}
+
+type ConfigReply struct {
+	WrongLeader bool
+	Leader      int
+}
+
+

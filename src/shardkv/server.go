@@ -3,6 +3,7 @@ package shardkv
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"labgob"
 	"labrpc"
 	"raft"
@@ -14,10 +15,12 @@ import (
 type OPCode string
 
 const (
-	GET     = "Get"
-	PUT     = "Put"
-	APPEND  = "Append"
-	MIGRATE = "Migrate"
+	GET         = "Get"
+	PUT         = "Put"
+	APPEND      = "Append"
+	GETSHARD    = "GetShard"
+	UPDATESHARD = "UpdateShard"
+	CONFIG      = "Config"
 )
 
 type ClerkTrackAction int
@@ -60,7 +63,7 @@ type KVRPCResp struct {
 	wrongLeader bool
 	leader      int
 	err         Err
-	value       string
+	value       interface{}
 }
 
 type ShardKV struct {
@@ -74,18 +77,17 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	servers      []*labrpc.ClientEnd
 	ck           *Clerk
 	sm           *shardmaster.Clerk
 	config       shardmaster.Config
 	booting      bool
-	migrateing   bool
 	DB           map[string]string
 	ClerkTrack   map[int64]int
 	ctx          context.Context
 	cancel       func()
 	issueing     chan KVRPCIssueItem
 	committing   chan KVRPCCommitItem
-	migrateDone  chan struct{}
 	pendingIndex int
 }
 
@@ -134,7 +136,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 				reply.Err = resp.err
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
-				reply.Value = resp.value
+				reply.Value = resp.value.(string)
 				DPrintf("reply Get me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
 			},
 			make(chan struct{})},
@@ -143,11 +145,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			if !kv.checkGroup(args.Key) {
 				reply.Err = ErrWrongGroup
 				DPrintf("wrongGroup Get me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
-				return false
-			}
-			if kv.checkMigrating() {
-				reply.Err = ErrWrongGroup
-				DPrintf("migrating Get me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
 				return false
 			}
 			return true
@@ -199,11 +196,6 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				DPrintf("wrongGroup PutAppend me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
 				return false
 			}
-			if kv.checkMigrating() {
-				reply.Err = ErrWrongGroup
-				DPrintf("migrating PutAppend me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
-				return false
-			}
 			return true
 		},
 
@@ -219,13 +211,13 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	DPrintf("reply PutAppend done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
 }
 
-func (kv *ShardKV) Migrate(args *MigrateArgs, reply *MigrateReply) {
+func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 	issue := KVRPCIssueItem{
-		kvRPCItem{&Op{MIGRATE, kv.me, args.ClerkId, args.SeqId,
+		kvRPCItem{&Op{GETSHARD, kv.me, -1, args.ConfigNum,
 			func() []byte {
 				s := new(bytes.Buffer)
 				e := labgob.NewEncoder(s)
-				e.Encode(args.Value)
+				e.Encode(args.Shard)
 				return s.Bytes()
 			}(),},
 			func(resp KVRPCResp) {
@@ -233,29 +225,21 @@ func (kv *ShardKV) Migrate(args *MigrateArgs, reply *MigrateReply) {
 				reply.Err = resp.err
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
-				DPrintf("reply Migrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+				reply.Value = resp.value.(map[string]string)
+				DPrintf("reply GetMigrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
 				//fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
 
 		func() bool {
-			switch kv.checkClerkTrack(args.ClerkId, args.SeqId) {
-			case ClerkIgnore:
-				DPrintf("ignore Migrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
-				//fmt.Printf("ignore Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
-				return false
-			case ClerkRetry:
+			kv.mu.Lock()
+			defer kv.mu.Lock()
+			if args.ConfigNum <= kv.config.Num {
 				reply.WrongLeader = true
 				reply.Leader = -1
-				DPrintf("retry Migrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
-				//fmt.Printf("retry Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
-				return false
-			}
-			if !kv.checkGroup("") {
-				reply.Err = ErrWrongGroup
-				DPrintf("wrongGroup Migrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
-				//fmt.Printf("wrongGroup Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+				DPrintf("retry GetMigrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+				//fmt.Printf("retry GetMigrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 				return false
 			}
 			return true
@@ -265,16 +249,182 @@ func (kv *ShardKV) Migrate(args *MigrateArgs, reply *MigrateReply) {
 			reply.Server = kv.me
 			reply.WrongLeader = true
 			reply.Leader = leader
-			DPrintf("NotLeader Migrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
+			DPrintf("NotLeader GetMigrate me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
 			//fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 		},
 	}
 	kv.issueing <- issue
 	<-issue.done
-	DPrintf("reply Migrate done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
+	DPrintf("reply GetMigrate done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
 	//fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
+}
 
+func (kv *ShardKV) UpdateShard(args UpdateShardArgs, reply *UpdateShardReply) {
+	issue := KVRPCIssueItem{
+		kvRPCItem{&Op{UPDATESHARD, kv.me, -1, args.ConfigNum,
+			func() []byte {
+				s := new(bytes.Buffer)
+				e := labgob.NewEncoder(s)
+				e.Encode(args.Value)
+				return s.Bytes()
+			}(),},
+			func(resp KVRPCResp) {
+				reply.WrongLeader = resp.wrongLeader
+				reply.Leader = resp.leader
+				DPrintf("reply Config me: %d gid: %d %+v", kv.me, kv.gid, args)
+				//fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+
+			},
+			make(chan struct{})},
+
+		func() bool {
+			return true
+		},
+
+		func(leader int) {
+			reply.WrongLeader = true
+			reply.Leader = leader
+			DPrintf("NotLeader Config me: %d gid: %d %+v", kv.me, kv.gid, args)
+			//fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+
+		},
+	}
+	kv.issueing <- issue
+	<-issue.done
+	DPrintf("reply Config done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
+	//fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
+}
+
+func (kv *ShardKV) updateShard(config shardmaster.Config, value map[string]string) {
+	args := UpdateShardArgs{}
+	args.ConfigNum = config.Num
+	args.Value = value
+
+	server := kv.me
+	for {
+		srv := kv.servers[server]
+		var reply UpdateShardReply
+		ok := false
+		DPrintf("updateShard req to %d, %+v", server, args)
+		fmt.Printf("updateShard req to %d, %+v\n", server, args)
+		if server == kv.me {
+			ok = true
+			kv.UpdateShard(args, &reply)
+		} else {
+			ok = srv.Call("ShardKV.UpdateShard", &args, &reply)
+		}
+		DPrintf("Done updateShard req to %d, %+v", server, args)
+		fmt.Printf("Done updateShard req to %d, %+v\n", server, args)
+		if ok && reply.WrongLeader == false {
+			return
+		}
+		server = reply.Leader
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func (kv *ShardKV) Config(args ConfigArgs, reply *ConfigReply) {
+	issue := KVRPCIssueItem{
+		kvRPCItem{&Op{CONFIG, kv.me, -1, args.Config.Num,
+			func() []byte {
+				s := new(bytes.Buffer)
+				e := labgob.NewEncoder(s)
+				e.Encode(args.Config)
+				return s.Bytes()
+			}(),},
+			func(resp KVRPCResp) {
+				reply.WrongLeader = resp.wrongLeader
+				reply.Leader = resp.leader
+				DPrintf("reply Config me: %d gid: %d %+v", kv.me, kv.gid, args)
+				//fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+
+			},
+			make(chan struct{})},
+
+		func() bool {
+			return true
+		},
+
+		func(leader int) {
+			reply.WrongLeader = true
+			reply.Leader = leader
+			DPrintf("NotLeader Config me: %d gid: %d %+v", kv.me, kv.gid, args)
+			//fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+
+		},
+	}
+	kv.issueing <- issue
+	<-issue.done
+	DPrintf("reply Config done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
+	//fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
+}
+
+func (kv *ShardKV) commitConfig(config shardmaster.Config) {
+	args := ConfigArgs{}
+	args.Config = config
+
+	server := kv.me
+	for {
+		srv := kv.servers[server]
+		var reply ConfigReply
+		ok := false
+		DPrintf("commitConfig req to %d, %+v", server, args)
+		//fmt.Printf("commitConfig req to %d, %+v\n", server, args)
+		if server == kv.me {
+			ok = true
+			kv.Config(args, &reply)
+		} else {
+			ok = srv.Call("ShardKV.Config", &args, &reply)
+		}
+		DPrintf("Done commitConfig req to %d, %+v", server, args)
+		//fmt.Printf("Done commitConfig req to %d, %+v\n", server, args)
+		if ok && reply.WrongLeader == false {
+			return
+		}
+		server = reply.Leader
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan struct{}) {
+	args := GetShardArgs{}
+	args.Shard = shard
+	//fmt.Printf("GetShard %d req me %d, gid %d\n", shard, kv.me, kv.gid)
+	kv.mu.Lock()
+	if kv.config.Shards[shard] == kv.gid || config.Shards[shard] != kv.gid || kv.config.Num == 0{
+		kv.mu.Unlock()
+		done <- struct{}{}
+		return
+	}
+	kv.mu.Unlock()
+
+	for {
+		args.ConfigNum = config.Num
+		kv.mu.Lock()
+		gid := kv.config.Shards[shard]
+		//fmt.Printf("GetShard %d req to gid %d me %d, gid %d\n", shard, gid, kv.me, kv.gid)
+		if servers, ok := kv.config.Groups[gid]; ok {
+			kv.mu.Unlock()
+			for si := 0; si < len(servers); si++ {
+				srv := kv.make_end(servers[si])
+				var reply GetShardReply
+				DPrintf("GetShard req to %s, %+v", servers[si], args)
+				//fmt.Printf("GetShard req to %s, %+v\n", servers[si], args)
+				ok := srv.Call("ShardKV.GetShard", &args, &reply)
+				DPrintf("Done GetShard req to %s, %+v", servers[si], args)
+				//fmt.Printf("Done GetShard req to %s, %+v\n", servers[si], args)
+				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
+					kv.updateShard(config, reply.Value)
+					done <- struct{}{}
+					return
+				}
+			}
+		} else {
+			kv.mu.Unlock()
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (kv *ShardKV) issue(item KVRPCIssueItem) {
@@ -317,7 +467,7 @@ func (kv *ShardKV) issueProcess() {
 	}
 }
 
-func (kv *ShardKV) execute(op *Op) (string, Err) {
+func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	switch op.OpCode {
@@ -361,7 +511,21 @@ func (kv *ShardKV) execute(op *Op) (string, Err) {
 			kv.DB[key] = v + value
 		}
 		break
-	case MIGRATE:
+	case GETSHARD:
+		shard := 0
+		value := make(map[string]string)
+		r := bytes.NewBuffer(op.Value)
+		d := labgob.NewDecoder(r)
+		if e := d.Decode(&shard); e != nil {
+			panic(e)
+		}
+		for k, v := range kv.DB {
+			if key2shard(k) == shard {
+				value[k] = v
+			}
+		}
+		return value, OK
+	case UPDATESHARD:
 		value := make(map[string]string)
 		r := bytes.NewBuffer(op.Value)
 		d := labgob.NewDecoder(r)
@@ -371,13 +535,19 @@ func (kv *ShardKV) execute(op *Op) (string, Err) {
 		for k, v := range value {
 			kv.DB[k] = v
 		}
-		kv.migrateDone <- struct{}{}
+		break
+	case CONFIG:
+		r := bytes.NewBuffer(op.Value)
+		d := labgob.NewDecoder(r)
+		if e := d.Decode(&kv.config); e != nil {
+			panic(e)
+		}
 		break
 	}
 	return "", OK
 }
 
-func (kv *ShardKV) servePendingRPC(apply *raft.ApplyMsg, err Err, value string) {
+func (kv *ShardKV) servePendingRPC(apply *raft.ApplyMsg, err Err, value interface{}) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	if apply.CommandIndex == kv.pendingIndex {
@@ -423,12 +593,18 @@ func (kv *ShardKV) updateClerkTrack(clerkId int64, seqId int) {
 func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	if snapshot == nil {
+		return
+	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	if e := d.Decode(&kv.DB); e != nil {
 		panic(e)
 	}
 	if e := d.Decode(&kv.ClerkTrack); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&kv.config); e != nil {
 		panic(e)
 	}
 }
@@ -440,6 +616,7 @@ func (kv *ShardKV) encodeSnapshot() []byte {
 	e := labgob.NewEncoder(s)
 	e.Encode(kv.DB)
 	e.Encode(kv.ClerkTrack)
+	e.Encode(kv.config)
 	return s.Bytes()
 }
 
@@ -448,7 +625,7 @@ func (kv *ShardKV) commitProcess() {
 		select {
 		case apply := <-kv.applyCh:
 			var err Err
-			var value string
+			var value interface{}
 			if apply.CommandValid {
 				op, _ := (apply.Command).(Op)
 				value, err = kv.execute(&op)
@@ -474,123 +651,25 @@ func (kv *ShardKV) commitProcess() {
 	}
 }
 
-type migrateItem struct {
-	db   map[string]string
-	done chan struct{}
-}
-
-func (kv *ShardKV) clrMigrating() {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	kv.migrateing = false
-}
-
-func (kv *ShardKV) checkMigrating() bool {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	ok := kv.migrateing
-	return ok
-}
-
 func (kv *ShardKV) updateConfig() {
-	kv.mu.Lock()
+	if _, isLeader, _ := kv.rf.GetState(); !isLeader {
+		return
+	}
 	config := kv.sm.Query(-1)
-	kv.config = config
+	kv.mu.Lock()
+	if config.Num <= kv.config.Num {
+		kv.mu.Unlock()
+		return
+	}
 	kv.mu.Unlock()
-	//if config.Num == kv.config.Num {
-	//	kv.mu.Unlock()
-	//	return
-	//}
-	//if kv.config.Num == 0 {
-	//	kv.config = config
-	//	kv.mu.Unlock()
-	//	return
-	//}
-	//if _, isLeader, _ := kv.rf.GetState(); isLeader {
-	//	shouldMigrate := func() map[int]migrateItem {
-	//		items := make(map[int]migrateItem, 0)
-	//		if _, ok := kv.config.Groups[kv.gid]; ok {
-	//			for k, v := range kv.DB {
-	//				shard := key2shard(k)
-	//				if newG := config.Shards[shard]; newG != kv.gid {
-	//					if _, ok := items[newG]; !ok {
-	//						items[newG] = migrateItem{
-	//							make(map[string]string),
-	//							make(chan struct{}),
-	//						}
-	//					}
-	//					items[newG].db[k] = v
-	//				}
-	//			}
-	//			for k := range config.Groups {
-	//				_, isOld := kv.config.Groups[k]
-	//				_, exist := items[k]
-	//				if !isOld && !exist && k != kv.gid {
-	//					items[k] = migrateItem{
-	//						make(map[string]string),
-	//						make(chan struct{}),
-	//					}
-	//				}
-	//
-	//			}
-	//		}
-	//		return items
-	//	}()
-	//	for gid, item := range shouldMigrate {
-	//		go func(id int, i migrateItem) {
-	//			kv.ck.Migrate(id, config, i.db)
-	//			i.done <- struct{}{}
-	//		}(gid, item)
-	//	}
-	//	fmt.Printf("%+v\n", kv.gid)
-	//	fmt.Printf("%+v\n", kv.config)
-	//	fmt.Printf("%+v\n", config)
-	//	fmt.Printf("%+v\n", shouldMigrate)
-	//
-	//	for _, item := range shouldMigrate {
-	//		<-item.done
-	//	}
-	//}
-	//nMigrates := func() int {
-	//	myShards := func(c shardmaster.Config) []int {
-	//		shards := make([]int, 0)
-	//		for i, s := range c.Shards {
-	//			if s == kv.gid {
-	//				shards = append(shards, i)
-	//			}
-	//		}
-	//		return shards
-	//	}
-	//	exist := func(a int, s []int) bool {
-	//		for _, v := range s {
-	//			if a == v {
-	//				return true
-	//			}
-	//		}
-	//		return false
-	//	}
-	//
-	//	table := make(map[int]bool)
-	//	old := myShards(kv.config)
-	//	new := myShards(config)
-	//	for _, n := range new {
-	//		if !exist(n, old) {
-	//			table[kv.config.Shards[n]] = true
-	//		}
-	//	}
-	//	return len(table)
-	//}()
-	//kv.migrateing = nMigrates > 0
-	//fmt.Printf("%+v\n", nMigrates)
-	//kv.mu.Unlock()
-	//for i := 0; i < nMigrates; i++ {
-	//	<-kv.migrateDone
-	//}
-	//kv.clrMigrating()
-	//kv.mu.Lock()
-	//kv.config = config
-	//kv.mu.Unlock()
-	//fmt.Printf("%d reconfig done\n", kv.gid)
+	dones := make(chan struct{}, shardmaster.NShards)
+	for i := 0; i < shardmaster.NShards; i ++ {
+		go kv.getShard(config, i, dones)
+	}
+	for i := 0; i < shardmaster.NShards; i ++ {
+		<-dones
+	}
+	kv.commitConfig(config)
 }
 
 func (kv *ShardKV) pollConfig() {
@@ -676,17 +755,17 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Your initialization code here.
 	kv.ck = MakeClerk(masters, make_end)
 	kv.sm = shardmaster.MakeClerk(masters)
+	kv.servers = servers
 	kv.booting = true
-	kv.migrateing = false
 	kv.DB = make(map[string]string)
 	kv.ClerkTrack = make(map[int64]int)
 	kv.issueing = make(chan KVRPCIssueItem)
 	kv.committing = make(chan KVRPCCommitItem, 1)
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
 	kv.pendingIndex = 0
-	kv.migrateDone = make(chan struct{})
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
+	kv.decodeSnapshot(persister.ReadSnapshot())
 	// You may need initialization code here.
 	go kv.commitProcess()
 	go kv.issueProcess()

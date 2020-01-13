@@ -162,32 +162,3 @@ func (ck *Clerk) Put(key string, value string) {
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }
-
-//func (ck *Clerk) Migrate(gid int, config shardmaster.Config, value map[string]string) {
-//	args := MigrateArgs{}
-//	args.Value = value
-//	args.ClerkId = ck.id
-//
-//	for {
-//		args.SeqId = ck.curSeqId[gid]
-//		if servers, ok := config.Groups[gid]; ok {
-//			for si := 0; si < len(servers); si++ {
-//				srv := ck.make_end(servers[si])
-//				var reply PutAppendReply
-//				DPrintf("Migrate req to %s, %+v", servers[si], args)
-//				fmt.Printf("Migrate req to %s, %+v\n", servers[si], args)
-//				ok := srv.Call("ShardKV.Migrate", &args, &reply)
-//				DPrintf("Done Migrate req to %s, %+v", servers[si], args)
-//				fmt.Printf("Done Migrate req to %s, %+v\n", servers[si], args)
-//				if ok && reply.WrongLeader == false && reply.Err == OK {
-//					ck.curSeqId[gid] ++
-//					return
-//				}
-//				if ok && reply.Err == ErrWrongGroup {
-//					break
-//				}
-//			}
-//		}
-//		time.Sleep(100 * time.Millisecond)
-//	}
-//}
