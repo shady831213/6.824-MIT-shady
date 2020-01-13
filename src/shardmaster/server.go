@@ -274,9 +274,10 @@ func (sm *ShardMaster) issue(item SMRPCIssueItem) {
 	if !item.preIssueCheck() {
 		return
 	}
-
+	sm.mu.Lock()
 	index, _, isLeader, leader := sm.rf.Start(*item.op)
 	if !isLeader {
+		sm.mu.Unlock()
 		item.wrongLeaderHandler(leader)
 		return
 
@@ -288,7 +289,6 @@ func (sm *ShardMaster) issue(item SMRPCIssueItem) {
 			make(chan struct{}),
 		},
 	}
-	sm.mu.Lock()
 	sm.pendingIndex = index
 	sm.mu.Unlock()
 	sm.committing <- commit

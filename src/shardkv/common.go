@@ -14,7 +14,7 @@ import (
 // You will have to modify these definitions.
 //
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -73,11 +73,11 @@ type GetReply struct {
 type GetShardArgs struct {
 	Shard     int
 	Gid       int64
-	ConfigNum   int
+	ConfigNum int
 }
 
 type GetShardReply struct {
-	Value   map[string]string
+	Value       map[string]string
 	WrongLeader bool
 	Err         Err
 	Leader      int
@@ -86,7 +86,8 @@ type GetShardReply struct {
 
 type UpdateShardArgs struct {
 	ConfigNum int
-	Value map[string]string
+	Shard     int
+	Value     map[string]string
 }
 
 type UpdateShardReply struct {
@@ -102,5 +103,3 @@ type ConfigReply struct {
 	WrongLeader bool
 	Leader      int
 }
-
-
