@@ -111,6 +111,9 @@ func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 	if e := d.Decode(&kv.Config); e != nil {
 		panic(e)
 	}
+	if e := d.Decode(&kv.ShardTrack); e != nil {
+		panic(e)
+	}
 }
 
 func (kv *ShardKV) encodeSnapshot() []byte {
@@ -121,6 +124,7 @@ func (kv *ShardKV) encodeSnapshot() []byte {
 	e.Encode(kv.DB)
 	e.Encode(kv.ClerkTrack)
 	e.Encode(kv.Config)
+	e.Encode(kv.ShardTrack)
 	return s.Bytes()
 }
 
@@ -168,7 +172,11 @@ func (kv *ShardKV) updateClerkTrack(clerkId int64, seqId int) {
 	DPrintf("updateTrack me: %d gid: %d clerkId:%v seqId:%v ok:%v track:%v %v", kv.me, kv.gid, clerkId, seqId, ok, v, kv.ClerkTrack)
 }
 
-
+func (kv *ShardKV) updateShadTrack(shard int, configNum int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.ShardTrack[shard] = configNum
+}
 
 func (kv *ShardKV) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
 	kv.mu.Lock()
@@ -190,6 +198,15 @@ func (kv *ShardKV) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
 	return ClerkIgnore
 }
 
+func (kv *ShardKV) checkShadTrack(shard int, configNum int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if configNum <= kv.ShardTrack[shard] {
+		return false
+	}
+	return true
+}
+
 func (kv *ShardKV) checkGroup(key string) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -205,6 +222,25 @@ func (kv *ShardKV) curConfig() shardmaster.Config {
 	defer kv.mu.Unlock()
 	config := kv.Config
 	return config
+}
+
+func (kv *ShardKV) nextConfig() shardmaster.Config {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	config := kv.NextConfig
+	return config
+}
+
+func (kv *ShardKV) updateCurConfig() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.Config = kv.NextConfig
+}
+
+func (kv *ShardKV) updateNextConfig(config shardmaster.Config) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.NextConfig = config
 }
 
 func (kv *ShardKV) tryNextConfig() (shardmaster.Config, bool) {
@@ -326,12 +362,11 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 			make(chan struct{})},
 
 		func() bool {
-			kv.mu.Lock()
-			defer kv.mu.Unlock()
-			if args.ConfigNum <= kv.ShardTrack[args.Shard] {
+			if args.ConfigNum < kv.curConfig().Num {
 				DPrintf("ignore GetShard me: %d gid: %d %+v", kv.me, kv.gid, args)
+				return false
 			}
-			if args.ConfigNum != kv.NextConfig.Num {
+			if args.ConfigNum != kv.nextConfig().Num {
 				reply.WrongLeader = true
 				reply.Leader = -1
 				DPrintf("retry GetShard me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
@@ -378,9 +413,7 @@ func (kv *ShardKV) UpdateShard(args *UpdateShardArgs, reply *UpdateShardReply) {
 			make(chan struct{})},
 
 		func() bool {
-			kv.mu.Lock()
-			defer kv.mu.Unlock()
-			if args.ConfigNum <= kv.ShardTrack[args.Shard] {
+			if !kv.checkShadTrack(args.Shard, args.ConfigNum) {
 				DPrintf("ignore UpdateShard me: %d gid: %d %+v", kv.me, kv.gid, args)
 				return false
 			}
@@ -562,7 +595,6 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	}
 }
 
-
 func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 	switch op.OpCode {
 	case PUT:
@@ -641,9 +673,7 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 		for k, v := range value {
 			kv.MigrateDB[k] = v
 		}
-		kv.mu.Lock()
-		kv.ShardTrack[shard] = configNum
-		kv.mu.Unlock()
+		kv.updateShadTrack(shard, configNum)
 		break
 	case STARTCONFIG:
 		config := shardmaster.Config{}
@@ -653,17 +683,13 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 			panic(e)
 		}
 		kv.MigrateDB = make(map[string]string)
-		kv.mu.Lock()
-		kv.NextConfig = config
-		kv.mu.Unlock()
+		kv.updateNextConfig(config)
 		break
 	case ENDCONFIG:
 		for k, v := range kv.MigrateDB {
 			kv.DB[k] = v
 		}
-		kv.mu.Lock()
-		kv.Config = kv.NextConfig
-		kv.mu.Unlock()
+		kv.updateCurConfig()
 		break
 	}
 	return "", OK
