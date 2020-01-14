@@ -3,6 +3,7 @@ package shardkv
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"labgob"
 	"labrpc"
 	"raft"
@@ -509,6 +510,97 @@ func (kv *ShardKV) EndConfig(args *EndConfigArgs, reply *ConfigReply) {
 	////fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
 }
 
+func (kv *ShardKV) exeGet(op *Op, d *labgob.LabDecoder) (interface{}, Err) {
+	key := ""
+	if e := d.Decode(&key); e != nil {
+		panic(e)
+	}
+	v, exist := kv.DB[key]
+	kv.updateClerkTrack(op.ClerkId, op.SeqId)
+	if !exist {
+		return "", ErrNoKey
+	}
+	return v, OK
+}
+
+func (kv *ShardKV) exePutAppend(op *Op, d *labgob.LabDecoder) (interface{}, Err) {
+	key, value := "", ""
+	if e := d.Decode(&key); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&value); e != nil {
+		panic(e)
+	}
+
+	switch op.OpCode {
+	case PUT:
+		kv.DB[key] = value
+		kv.updateClerkTrack(op.ClerkId, op.SeqId)
+		break
+	case APPEND:
+		if v, exist := kv.DB[key]; !exist {
+			kv.DB[key] = value
+		} else {
+			kv.DB[key] = v + value
+		}
+		kv.updateClerkTrack(op.ClerkId, op.SeqId)
+		break
+	}
+	return "", OK
+}
+
+func (kv *ShardKV) exeGetShard(op *Op, d *labgob.LabDecoder) (interface{}, Err) {
+	shard := 0
+	value := make(map[string]string)
+	if e := d.Decode(&shard); e != nil {
+		panic(e)
+	}
+	for k, v := range kv.DB {
+		if key2shard(k) == shard {
+			value[k] = v
+		}
+	}
+	return value, OK
+}
+
+func (kv *ShardKV) exeUpdateShard(op *Op, d *labgob.LabDecoder) (interface{}, Err) {
+	shard := 0
+	configNum := 0
+	value := make(map[string]string)
+	if e := d.Decode(&shard); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&configNum); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&value); e != nil {
+		panic(e)
+	}
+	for k, v := range value {
+		kv.MigrateDB[k] = v
+	}
+	kv.updateShadTrack(shard, configNum)
+	return nil, OK
+}
+
+func (kv *ShardKV) exeStartConfig(op *Op, d *labgob.LabDecoder) (interface{}, Err) {
+	config := shardmaster.Config{}
+	if e := d.Decode(&config); e != nil {
+		panic(e)
+	}
+	kv.MigrateDB = make(map[string]string)
+	kv.updateNextConfig(config)
+	return nil, OK
+}
+
+func (kv *ShardKV) exeEndConfig(op *Op, d *labgob.LabDecoder) (interface{}, Err) {
+	for k, v := range kv.MigrateDB {
+		kv.DB[k] = v
+	}
+	kv.updateCurConfig()
+	return nil, OK
+}
+
 func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(*labrpc.ClientEnd) (bool, int)) {
 	server := kv.me
 	for {
@@ -596,103 +688,24 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 }
 
 func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
+	r := bytes.NewBuffer(op.Value)
+	d := labgob.NewDecoder(r)
+
 	switch op.OpCode {
-	case PUT:
-		key, value := "", ""
-		r := bytes.NewBuffer(op.Value)
-		d := labgob.NewDecoder(r)
-		if e := d.Decode(&key); e != nil {
-			panic(e)
-		}
-		if e := d.Decode(&value); e != nil {
-			panic(e)
-		}
-		kv.DB[key] = value
-		kv.updateClerkTrack(op.ClerkId, op.SeqId)
-		break
 	case GET:
-		key := ""
-		r := bytes.NewBuffer(op.Value)
-		d := labgob.NewDecoder(r)
-		if e := d.Decode(&key); e != nil {
-			panic(e)
-		}
-		v, exist := kv.DB[key]
-		kv.updateClerkTrack(op.ClerkId, op.SeqId)
-		if !exist {
-			return "", ErrNoKey
-		}
-		return v, OK
-	case APPEND:
-		key, value := "", ""
-		r := bytes.NewBuffer(op.Value)
-		d := labgob.NewDecoder(r)
-		if e := d.Decode(&key); e != nil {
-			panic(e)
-		}
-		if e := d.Decode(&value); e != nil {
-			panic(e)
-		}
-		if v, exist := kv.DB[key]; !exist {
-			kv.DB[key] = value
-		} else {
-			kv.DB[key] = v + value
-		}
-		kv.updateClerkTrack(op.ClerkId, op.SeqId)
-		break
+		return kv.exeGet(op, d)
+	case PUT, APPEND:
+		return kv.exePutAppend(op, d)
 	case GETSHARD:
-		shard := 0
-		value := make(map[string]string)
-		r := bytes.NewBuffer(op.Value)
-		d := labgob.NewDecoder(r)
-		if e := d.Decode(&shard); e != nil {
-			panic(e)
-		}
-		for k, v := range kv.DB {
-			if key2shard(k) == shard {
-				value[k] = v
-			}
-		}
-		//fmt.Printf("excute GetShard me: %d gid: %d %+v\n", kv.me, kv.gid, op)
-		return value, OK
+		return kv.exeGetShard(op, d)
 	case UPDATESHARD:
-		shard := 0
-		configNum := 0
-		value := make(map[string]string)
-		r := bytes.NewBuffer(op.Value)
-		d := labgob.NewDecoder(r)
-		if e := d.Decode(&shard); e != nil {
-			panic(e)
-		}
-		if e := d.Decode(&configNum); e != nil {
-			panic(e)
-		}
-		if e := d.Decode(&value); e != nil {
-			panic(e)
-		}
-		for k, v := range value {
-			kv.MigrateDB[k] = v
-		}
-		kv.updateShadTrack(shard, configNum)
-		break
+		return kv.exeUpdateShard(op, d)
 	case STARTCONFIG:
-		config := shardmaster.Config{}
-		r := bytes.NewBuffer(op.Value)
-		d := labgob.NewDecoder(r)
-		if e := d.Decode(&config); e != nil {
-			panic(e)
-		}
-		kv.MigrateDB = make(map[string]string)
-		kv.updateNextConfig(config)
-		break
+		return kv.exeStartConfig(op, d)
 	case ENDCONFIG:
-		for k, v := range kv.MigrateDB {
-			kv.DB[k] = v
-		}
-		kv.updateCurConfig()
-		break
+		return kv.exeEndConfig(op, d)
 	}
-	return "", OK
+	panic(fmt.Sprint("invalid opcode", op.OpCode))
 }
 
 func (kv *ShardKV) issue(item KVRPCIssueItem) {
