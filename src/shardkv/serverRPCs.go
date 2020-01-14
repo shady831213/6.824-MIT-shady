@@ -228,6 +228,7 @@ func (r *GetShard) execute(op *Op) (interface{}, Err) {
 			value[k] = v
 		}
 	}
+	r.kv.updateShadTrack(shard, op.SeqId)
 	return value, OK
 }
 

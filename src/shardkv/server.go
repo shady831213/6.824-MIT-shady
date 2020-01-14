@@ -178,10 +178,15 @@ func (kv *ShardKV) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
 	return ClerkIgnore
 }
 
-func (kv *ShardKV) checkShadTrack(shard int, configNum int) bool {
+func (kv *ShardKV) shadTrack(shard int) int {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if configNum <= kv.ShardTrack[shard] {
+	configNum := kv.ShardTrack[shard]
+	return configNum
+}
+
+func (kv *ShardKV) checkShadTrack(shard int, configNum int) bool {
+	if configNum <= kv.shadTrack(shard) {
 		return false
 	}
 	return true
@@ -326,7 +331,16 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	args.Gid = int64(kv.gid)
 	defer func() { done <- struct{}{} }()
 	curConfig := kv.curConfig()
-	if curConfig.Shards[shard] == kv.gid || config.Shards[shard] != kv.gid || curConfig.Num == 0 {
+	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] == kv.gid ||
+		curConfig.Shards[shard] != kv.gid && config.Shards[shard] != kv.gid ||
+		curConfig.Num == 0 {
+		kv.updateShard(config, shard, make(map[string]string))
+		return
+	}
+
+	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] != kv.gid {
+		for config.Num != kv.shadTrack(shard) {
+		}
 		kv.updateShard(config, shard, make(map[string]string))
 		return
 	}
