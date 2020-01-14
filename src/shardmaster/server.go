@@ -402,11 +402,8 @@ func (sm *ShardMaster) execute(op *Op) (interface{}, Err) {
 			panic(e)
 		}
 		DPrintf("execute Query me: %d %+v %+v", sm.me, op, sm.configs)
-		if num < 0 {
+		if num < 0 || num > len(sm.configs)-1 {
 			return sm.configs[len(sm.configs)-1], OK
-		}
-		if num > len(sm.configs)-1 {
-			return sm.configs[len(sm.configs)-1], Err(fmt.Sprintf("config %d does not exist!", num))
 		}
 		return sm.configs[num], OK
 	}

@@ -95,11 +95,15 @@ type UpdateShardReply struct {
 	Leader      int
 }
 
-type ConfigArgs struct {
+type StartConfigArgs struct {
 	Config shardmaster.Config
 }
 
 type ConfigReply struct {
 	WrongLeader bool
 	Leader      int
+}
+
+type EndConfigArgs struct {
+	ConfigNum int
 }

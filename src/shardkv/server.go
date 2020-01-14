@@ -80,8 +80,9 @@ type ShardKV struct {
 	servers      []*labrpc.ClientEnd
 	ck           *Clerk
 	sm           *shardmaster.Clerk
-	config       shardmaster.Config
-	newConfig    shardmaster.Config
+	Config       shardmaster.Config
+	NextConfig   shardmaster.Config
+	MigrateDB    map[string]string
 	booting      bool
 	DB           map[string]string
 	ClerkTrack   map[int64]int
@@ -116,11 +117,19 @@ func (kv *ShardKV) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
 func (kv *ShardKV) checkGroup(key string) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	_, ok := kv.config.Groups[kv.gid]
-	_, newOk := kv.newConfig.Groups[kv.gid]
+	_, ok := kv.Config.Groups[kv.gid]
+	_, newOk := kv.NextConfig.Groups[kv.gid]
 	shard := key2shard(key)
-	return (kv.config.Shards[shard] == kv.gid) && (kv.newConfig.Shards[shard] == kv.gid) && ok && newOk
+	return (kv.Config.Shards[shard] == kv.gid) && (kv.NextConfig.Shards[shard] == kv.gid) && ok && newOk
 
+}
+
+func (kv *ShardKV) nextConfig() (shardmaster.Config, bool) {
+	kv.mu.Lock()
+	configNum := kv.Config.Num
+	kv.mu.Unlock()
+	config := kv.sm.Query(configNum + 1)
+	return config, config.Num > configNum
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -239,7 +248,7 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 			if args.ConfigNum <= kv.ShardTrack[args.Shard] {
 				DPrintf("ignore GetShard me: %d gid: %d %+v", kv.me, kv.gid, args)
 			}
-			if args.ConfigNum != kv.newConfig.Num {
+			if args.ConfigNum != kv.NextConfig.Num {
 				reply.WrongLeader = true
 				reply.Leader = -1
 				DPrintf("retry GetShard me: %d gid: %d %+v %+v", kv.me, kv.gid, args, reply)
@@ -309,7 +318,7 @@ func (kv *ShardKV) UpdateShard(args *UpdateShardArgs, reply *UpdateShardReply) {
 	////fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
 }
 
-func (kv *ShardKV) StartConfig(args *ConfigArgs, reply *ConfigReply) {
+func (kv *ShardKV) StartConfig(args *StartConfigArgs, reply *ConfigReply) {
 	issue := KVRPCIssueItem{
 		kvRPCItem{&Op{STARTCONFIG, kv.me, -1, args.Config.Num,
 			func() []byte {
@@ -328,6 +337,12 @@ func (kv *ShardKV) StartConfig(args *ConfigArgs, reply *ConfigReply) {
 			make(chan struct{})},
 
 		func() bool {
+			kv.mu.Lock()
+			defer kv.mu.Unlock()
+			if args.Config.Num <= kv.Config.Num {
+				DPrintf("ignore StartConfig me: %d gid: %d %+v", kv.me, kv.gid, args)
+				return false
+			}
 			return true
 		},
 
@@ -345,15 +360,10 @@ func (kv *ShardKV) StartConfig(args *ConfigArgs, reply *ConfigReply) {
 	////fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
 }
 
-func (kv *ShardKV) EndConfig(args *ConfigArgs, reply *ConfigReply) {
+func (kv *ShardKV) EndConfig(args *EndConfigArgs, reply *ConfigReply) {
 	issue := KVRPCIssueItem{
-		kvRPCItem{&Op{ENDCONFIG, kv.me, -1, args.Config.Num,
-			func() []byte {
-				s := new(bytes.Buffer)
-				e := labgob.NewEncoder(s)
-				e.Encode(args.Config)
-				return s.Bytes()
-			}(),},
+		kvRPCItem{&Op{ENDCONFIG, kv.me, -1, args.ConfigNum,
+			func() []byte { return []byte{} }(),},
 			func(resp KVRPCResp) {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
@@ -364,6 +374,12 @@ func (kv *ShardKV) EndConfig(args *ConfigArgs, reply *ConfigReply) {
 			make(chan struct{})},
 
 		func() bool {
+			kv.mu.Lock()
+			defer kv.mu.Unlock()
+			if args.ConfigNum <= kv.Config.Num {
+				DPrintf("ignore EndConfig me: %d gid: %d %+v", kv.me, kv.gid, args)
+				return false
+			}
 			return true
 		},
 
@@ -412,7 +428,7 @@ func (kv *ShardKV) updateShard(config shardmaster.Config, shard int, value map[s
 }
 
 func (kv *ShardKV) startConfig(config shardmaster.Config) {
-	args := ConfigArgs{}
+	args := StartConfigArgs{}
 	args.Config = config
 
 	kv.migrateReqs(args, "StartConfig", func(srv *labrpc.ClientEnd) (bool, int) {
@@ -422,9 +438,9 @@ func (kv *ShardKV) startConfig(config shardmaster.Config) {
 	})
 }
 
-func (kv *ShardKV) endConfig(config shardmaster.Config) {
-	args := ConfigArgs{}
-	args.Config = config
+func (kv *ShardKV) endConfig(configNum int) {
+	args := EndConfigArgs{}
+	args.ConfigNum = configNum
 
 	kv.migrateReqs(args, "EndConfig", func(srv *labrpc.ClientEnd) (bool, int) {
 		var reply ConfigReply
@@ -439,7 +455,7 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	args.Gid = int64(kv.gid)
 	defer func() { done <- struct{}{} }()
 	kv.mu.Lock()
-	if kv.config.Shards[shard] == kv.gid || config.Shards[shard] != kv.gid || kv.config.Num == 0 {
+	if kv.Config.Shards[shard] == kv.gid || config.Shards[shard] != kv.gid || kv.Config.Num == 0 {
 		kv.mu.Unlock()
 		kv.updateShard(config, shard, make(map[string]string))
 		return
@@ -449,8 +465,8 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	for {
 		args.ConfigNum = config.Num
 		kv.mu.Lock()
-		gid := kv.config.Shards[shard]
-		if servers, ok := kv.config.Groups[gid]; ok {
+		gid := kv.Config.Shards[shard]
+		if servers, ok := kv.Config.Groups[gid]; ok {
 			kv.mu.Unlock()
 			//fmt.Printf("GetShard %d req to gid %d me %d, gid %d\n", shard, gid, kv.me, kv.gid)
 			for si := 0; si < len(servers); si++ {
@@ -587,7 +603,7 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 			panic(e)
 		}
 		for k, v := range value {
-			kv.DB[k] = v
+			kv.MigrateDB[k] = v
 		}
 		kv.mu.Lock()
 		kv.ShardTrack[shard] = configNum
@@ -600,19 +616,17 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 		if e := d.Decode(&config); e != nil {
 			panic(e)
 		}
+		kv.MigrateDB = make(map[string]string)
 		kv.mu.Lock()
-		kv.newConfig = config
+		kv.NextConfig = config
 		kv.mu.Unlock()
 		break
 	case ENDCONFIG:
-		config := shardmaster.Config{}
-		r := bytes.NewBuffer(op.Value)
-		d := labgob.NewDecoder(r)
-		if e := d.Decode(&config); e != nil {
-			panic(e)
+		for k, v := range kv.MigrateDB {
+			kv.DB[k] = v
 		}
 		kv.mu.Lock()
-		kv.config = config
+		kv.Config = kv.NextConfig
 		kv.mu.Unlock()
 		break
 	}
@@ -680,7 +694,7 @@ func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 	if e := d.Decode(&kv.ClerkTrack); e != nil {
 		panic(e)
 	}
-	if e := d.Decode(&kv.config); e != nil {
+	if e := d.Decode(&kv.Config); e != nil {
 		panic(e)
 	}
 }
@@ -692,7 +706,7 @@ func (kv *ShardKV) encodeSnapshot() []byte {
 	e := labgob.NewEncoder(s)
 	e.Encode(kv.DB)
 	e.Encode(kv.ClerkTrack)
-	e.Encode(kv.config)
+	e.Encode(kv.Config)
 	return s.Bytes()
 }
 
@@ -731,13 +745,10 @@ func (kv *ShardKV) updateConfig() {
 	if _, isLeader, _ := kv.rf.GetState(); !isLeader {
 		return
 	}
-	config := kv.sm.Query(-1)
-	kv.mu.Lock()
-	if config.Num <= kv.config.Num {
-		kv.mu.Unlock()
+	config, update := kv.nextConfig()
+	if !update {
 		return
 	}
-	kv.mu.Unlock()
 	kv.startConfig(config)
 	dones := make(chan struct{}, shardmaster.NShards)
 	for i := 0; i < shardmaster.NShards; i ++ {
@@ -746,7 +757,7 @@ func (kv *ShardKV) updateConfig() {
 	for i := 0; i < shardmaster.NShards; i ++ {
 		<-dones
 	}
-	kv.endConfig(config)
+	kv.endConfig(config.Num)
 }
 
 func (kv *ShardKV) pollConfig() {
@@ -835,6 +846,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.servers = servers
 	kv.booting = true
 	kv.DB = make(map[string]string)
+	kv.MigrateDB = make(map[string]string)
 	kv.ClerkTrack = make(map[int64]int)
 	kv.ShardTrack = [shardmaster.NShards]int{}
 	kv.issueing = make(chan KVRPCIssueItem)
