@@ -83,7 +83,6 @@ type ShardKV struct {
 	sm           *shardmaster.Clerk
 	Config       shardmaster.Config
 	NextConfig   shardmaster.Config
-	MigrateDB    map[string]string
 	booting      bool
 	DB           map[string]string
 	ClerkTrack   map[int64]int
@@ -124,6 +123,9 @@ func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 	if e := d.Decode(&kv.Config); e != nil {
 		panic(e)
 	}
+	if e := d.Decode(&kv.NextConfig); e != nil {
+		panic(e)
+	}
 	if e := d.Decode(&kv.ShardTrack); e != nil {
 		panic(e)
 	}
@@ -137,6 +139,7 @@ func (kv *ShardKV) encodeSnapshot() []byte {
 	e.Encode(kv.DB)
 	e.Encode(kv.ClerkTrack)
 	e.Encode(kv.Config)
+	e.Encode(kv.NextConfig)
 	e.Encode(kv.ShardTrack)
 	return s.Bytes()
 }
@@ -187,17 +190,26 @@ func (kv *ShardKV) checkShadTrack(shard int, configNum int) bool {
 func (kv *ShardKV) checkGroup(key string) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	_, ok := kv.Config.Groups[kv.gid]
-	_, newOk := kv.NextConfig.Groups[kv.gid]
+	_, existGroup := kv.Config.Groups[kv.gid]
+	_, newExistGroup := kv.NextConfig.Groups[kv.gid]
 	shard := key2shard(key)
-	return (kv.Config.Shards[shard] == kv.gid) && (kv.NextConfig.Shards[shard] == kv.gid) && ok && newOk
+	ok := (kv.Config.Shards[shard] == kv.gid) && (kv.NextConfig.Shards[shard] == kv.gid) && existGroup && newExistGroup && (kv.Config.Num == kv.NextConfig.Num)
+	return ok
 
 }
 
 func (kv *ShardKV) curConfig() shardmaster.Config {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	config := kv.Config
+	config := shardmaster.Config{}
+	config.Num = kv.Config.Num
+	for k, v := range kv.Config.Shards {
+		config.Shards[k] = v
+	}
+	config.Groups = make(map[int][]string)
+	for k, v := range kv.Config.Groups {
+		config.Groups[k] = v
+	}
 	return config
 }
 
@@ -323,6 +335,7 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 		args.ConfigNum = config.Num
 		gid := curConfig.Shards[shard]
 		if servers, ok := curConfig.Groups[gid]; ok {
+			DPrintf("GetShard %d req to gid %d me %d, gid %d, %+v", shard, gid, kv.me, kv.gid, curConfig)
 			//fmt.Printf("GetShard %d req to gid %d me %d, gid %d\n", shard, gid, kv.me, kv.gid)
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
@@ -566,7 +579,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.servers = servers
 	kv.booting = true
 	kv.DB = make(map[string]string)
-	kv.MigrateDB = make(map[string]string)
 	kv.ClerkTrack = make(map[int64]int)
 	kv.ShardTrack = [shardmaster.NShards]int{}
 	kv.issueing = make(chan KVRPCIssueItem)
@@ -575,7 +587,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.pendingIndex = 0
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
-	kv.decodeSnapshot(persister.ReadSnapshot())
+	//kv.decodeSnapshot(persister.ReadSnapshot())
 	// You may need initialization code here.
 	go kv.commitProcess()
 	go kv.issueProcess()

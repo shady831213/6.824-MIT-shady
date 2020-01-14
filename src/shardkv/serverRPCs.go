@@ -50,16 +50,16 @@ func (r *Get) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				reply.Value = resp.value.(string)
+				if value, ok := resp.value.(string); !ok {
+					reply.Value = ""
+				} else {
+					reply.Value = value
+				}
 				DPrintf("reply Get me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
 			},
 			make(chan struct{})},
 
 		func() bool {
-			if !r.kv.checkGroup(args.Key) {
-				reply.Err = ErrWrongGroup
-				DPrintf("wrongGroup Get me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
-				return false
-			}
 			return true
 		},
 		func(leader int) {
@@ -78,6 +78,10 @@ func (r *Get) execute(op *Op) (interface{}, Err) {
 			panic(e)
 		}
 	})
+	if !r.kv.checkGroup(key) {
+		DPrintf("wrongGroup Get me: %d gid: %d %+v", r.kv.me, r.kv.gid, op)
+		return "", ErrWrongGroup
+	}
 	v, exist := r.kv.DB[key]
 	r.kv.updateClerkTrack(op.ClerkId, op.SeqId)
 	if !exist {
@@ -119,11 +123,6 @@ func (r *PugAppend) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				DPrintf("retry PutAppend me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
 				return false
 			}
-			if !r.kv.checkGroup(args.Key) {
-				reply.Err = ErrWrongGroup
-				DPrintf("wrongGroup PutAppend me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
-				return false
-			}
 			return true
 		},
 
@@ -146,6 +145,10 @@ func (r *PugAppend) execute(op *Op) (interface{}, Err) {
 			panic(e)
 		}
 	})
+	if !r.kv.checkGroup(key) {
+		DPrintf("wrongGroup %s me: %d gid: %d %+v", op.OpCode, r.kv.me, r.kv.gid, op)
+		return "", ErrWrongGroup
+	}
 	switch op.OpCode {
 	case PUT:
 		r.kv.DB[key] = value
@@ -189,10 +192,6 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			make(chan struct{})},
 
 		func() bool {
-			if args.ConfigNum < r.kv.curConfig().Num {
-				DPrintf("ignore GetShard me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
-				return false
-			}
 			if args.ConfigNum != r.kv.nextConfig().Num {
 				reply.WrongLeader = true
 				reply.Leader = -1
@@ -290,7 +289,7 @@ func (r *UpdateShard) execute(op *Op) (interface{}, Err) {
 	})
 
 	for k, v := range value {
-		r.kv.MigrateDB[k] = v
+		r.kv.DB[k] = v
 	}
 	r.kv.updateShadTrack(shard, configNum)
 	return nil, OK
@@ -342,7 +341,6 @@ func (r *StartConfig) execute(op *Op) (interface{}, Err) {
 			panic(e)
 		}
 	})
-	r.kv.MigrateDB = make(map[string]string)
 	r.kv.updateNextConfig(config)
 	return nil, OK
 }
@@ -385,9 +383,6 @@ func (r *EndConfig) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 }
 
 func (r *EndConfig) execute(op *Op) (interface{}, Err) {
-	for k, v := range r.kv.MigrateDB {
-		r.kv.DB[k] = v
-	}
 	r.kv.updateCurConfig()
 	return nil, OK
 }

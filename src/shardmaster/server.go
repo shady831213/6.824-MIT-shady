@@ -12,7 +12,6 @@ import "labrpc"
 import "sync"
 import "labgob"
 
-
 type OPCode string
 
 const (
@@ -250,7 +249,12 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 				reply.Err = resp.err
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
-				reply.Config = resp.value.(Config)
+				if config, ok := resp.value.(Config); !ok {
+					reply.Config = Config{}
+				} else {
+					reply.Config = config
+				}
+
 				DPrintf("reply Query me: %d %+v %+v", sm.me, args, reply)
 			},
 			make(chan struct{})},
@@ -342,7 +346,7 @@ func (sm *ShardMaster) execute(op *Op) (interface{}, Err) {
 		//fixme:may be set vnode number corresponding server number
 		for k, v := range servers {
 			config.Groups[k] = v
-			sm.chash.AddNode(strconv.Itoa(k),len(v))
+			sm.chash.AddNode(strconv.Itoa(k), len(v))
 		}
 		for i := range config.Shards {
 			gs := sm.chash.GetNode(strconv.Itoa(i))
@@ -369,7 +373,7 @@ func (sm *ShardMaster) execute(op *Op) (interface{}, Err) {
 			delete(config.Groups, g)
 			sm.chash.RemoveNode(strconv.Itoa(g))
 		}
-		for _,i := range shards {
+		for _, i := range shards {
 			g, _ := strconv.Atoi(sm.chash.GetNode(strconv.Itoa(i)))
 			config.Shards[i] = g
 		}
