@@ -198,6 +198,7 @@ func (kv *ShardKV) checkGroup(key string) bool {
 	_, existGroup := kv.Config.Groups[kv.gid]
 	_, newExistGroup := kv.NextConfig.Groups[kv.gid]
 	shard := key2shard(key)
+	DPrintf("checkGroup me: %d gid: %d config:%+v, nextconfig:%+v, track:%+v", kv.me, kv.gid, kv.Config, kv.NextConfig, kv.ShardTrack)
 	ok := (kv.Config.Shards[shard] == kv.gid) && (kv.NextConfig.Shards[shard] == kv.gid) && existGroup && newExistGroup && (kv.Config.Num == kv.NextConfig.Num)
 	return ok
 
@@ -284,6 +285,11 @@ func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(int) (boo
 		if ok {
 			return
 		}
+		select {
+		case <-kv.ctx.Done():
+			return
+		default:
+		}
 		server = leader
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -354,6 +360,11 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 
 	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] != kv.gid {
 		for config.Num != kv.shadTrack(shard) {
+			select {
+			case <-kv.ctx.Done():
+				return
+			default:
+			}
 		}
 		return
 	}
@@ -375,6 +386,11 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 					//fmt.Printf("Done GetShard req to %s, %+v\n", servers[si], args)
 					kv.updateShard(config, shard, reply.Value)
 					return
+				}
+				select {
+				case <-kv.ctx.Done():
+					return
+				default:
 				}
 			}
 		}
@@ -536,7 +552,6 @@ func (kv *ShardKV) pollConfig() {
 // turn off debug output from this instance.
 //
 func (kv *ShardKV) Kill() {
-	DPrintf("server%d gid%d killed", kv.me, kv.gid)
 	kv.rf.Kill()
 	// Your code here, if desired.
 	kv.cancel()
@@ -550,6 +565,7 @@ func (kv *ShardKV) Kill() {
 		close(item.done)
 	default:
 	}
+	DPrintf("server%d gid%d killed", kv.me, kv.gid)
 }
 
 //
@@ -614,12 +630,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.pendingIndex = 0
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
-	//kv.decodeSnapshot(persister.ReadSnapshot())
+	//if snapshot := kv.rf.GetSnapshot();snapshot.Index != 0 {
+	//	kv.decodeSnapshot(snapshot.Data)
+	//}
 	// You may need initialization code here.
 	go kv.commitProcess()
 	go kv.issueProcess()
 	go kv.pollConfig()
-	DPrintf("server%d start", kv.me)
+	DPrintf("server%d gid%d started", kv.me, kv.gid)
 	// Use something like this to talk to the shardmaster:
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
 
