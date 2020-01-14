@@ -19,7 +19,7 @@ const (
 	APPEND      = "Append"
 	GETSHARD    = "GetShard"
 	UPDATESHARD = "UpdateShard"
-	CONFIG      = "Config"
+	STARTCONFIG = "StartConfig"
 	ENDCONFIG   = "EndConfig"
 )
 
@@ -309,32 +309,9 @@ func (kv *ShardKV) UpdateShard(args *UpdateShardArgs, reply *UpdateShardReply) {
 	////fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
 }
 
-func (kv *ShardKV) updateShard(config shardmaster.Config, shard int, value map[string]string) {
-	args := UpdateShardArgs{}
-	args.ConfigNum = config.Num
-	args.Shard = shard
-	args.Value = value
-
-	server := kv.me
-	for {
-		srv := kv.servers[server]
-		var reply UpdateShardReply
-		DPrintf("updateShard req to %d gid: %d, %+v", server, kv.gid, args)
-		//fmt.Printf("updateShard req to %d, %+v\n", server, args)
-		ok := srv.Call("ShardKV.UpdateShard", &args, &reply)
-		DPrintf("Done updateShard req to %d gid: %d, %+v", server, kv.gid, args)
-		//fmt.Printf("Done updateShard req to %d, %+v\n", server, args)
-		if ok && reply.WrongLeader == false {
-			return
-		}
-		server = reply.Leader
-	}
-	time.Sleep(100 * time.Millisecond)
-}
-
-func (kv *ShardKV) Config(args *ConfigArgs, reply *ConfigReply) {
+func (kv *ShardKV) StartConfig(args *ConfigArgs, reply *ConfigReply) {
 	issue := KVRPCIssueItem{
-		kvRPCItem{&Op{CONFIG, kv.me, -1, args.Config.Num,
+		kvRPCItem{&Op{STARTCONFIG, kv.me, -1, args.Config.Num,
 			func() []byte {
 				s := new(bytes.Buffer)
 				e := labgob.NewEncoder(s)
@@ -344,7 +321,7 @@ func (kv *ShardKV) Config(args *ConfigArgs, reply *ConfigReply) {
 			func(resp KVRPCResp) {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
-				DPrintf("reply Config me: %d gid: %d %+v", kv.me, kv.gid, args)
+				DPrintf("reply StartConfig me: %d gid: %d %+v", kv.me, kv.gid, args)
 				////fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 			},
@@ -357,36 +334,15 @@ func (kv *ShardKV) Config(args *ConfigArgs, reply *ConfigReply) {
 		func(leader int) {
 			reply.WrongLeader = true
 			reply.Leader = leader
-			DPrintf("NotLeader Config me: %d gid: %d %+v", kv.me, kv.gid, args)
+			DPrintf("NotLeader StartConfig me: %d gid: %d %+v", kv.me, kv.gid, args)
 			////fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 		},
 	}
 	kv.issueing <- issue
 	<-issue.done
-	DPrintf("reply Config done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
+	DPrintf("reply StartConfig done me: %d gid: %d %+v", kv.me, kv.gid, issue.op)
 	////fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
-}
-
-func (kv *ShardKV) startConfig(config shardmaster.Config) {
-	args := ConfigArgs{}
-	args.Config = config
-
-	server := kv.me
-	for {
-		srv := kv.servers[server]
-		var reply ConfigReply
-		DPrintf("startConfig req to %d, %+v", server, args)
-		//fmt.Printf("startConfig req to %d, %+v\n", server, args)
-		ok := srv.Call("ShardKV.Config", &args, &reply)
-		DPrintf("Done startConfig req to %d, %+v", server, args)
-		//fmt.Printf("Done startConfig req to %d, %+v\n", server, args)
-		if ok && reply.WrongLeader == false {
-			return
-		}
-		server = reply.Leader
-	}
-	time.Sleep(100 * time.Millisecond)
 }
 
 func (kv *ShardKV) EndConfig(args *ConfigArgs, reply *ConfigReply) {
@@ -425,25 +381,56 @@ func (kv *ShardKV) EndConfig(args *ConfigArgs, reply *ConfigReply) {
 	////fmt.Printf("reply Migrate done me: %d gid: %d %+v\n", kv.me, kv.gid, issue.op)
 }
 
+func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(*labrpc.ClientEnd) (bool, int)) {
+	server := kv.me
+	for {
+		srv := kv.servers[server]
+		DPrintf("%s req to %d gid: %d, %+v", name, server, kv.gid, args)
+		//fmt.Printf("updateShard req to %d, %+v\n", server, args)
+		ok, leader := rpc(srv)
+		DPrintf("Done %s req to %d gid: %d, %+v", name, server, kv.gid, args)
+		//fmt.Printf("Done updateShard req to %d, %+v\n", server, args)
+		if ok {
+			return
+		}
+		server = leader
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func (kv *ShardKV) updateShard(config shardmaster.Config, shard int, value map[string]string) {
+	args := UpdateShardArgs{}
+	args.ConfigNum = config.Num
+	args.Shard = shard
+	args.Value = value
+
+	kv.migrateReqs(args, "UpdateShard", func(srv *labrpc.ClientEnd) (bool, int) {
+		var reply UpdateShardReply
+		ok := srv.Call("ShardKV.UpdateShard", &args, &reply)
+		return ok && reply.WrongLeader == false, reply.Leader
+	})
+}
+
+func (kv *ShardKV) startConfig(config shardmaster.Config) {
+	args := ConfigArgs{}
+	args.Config = config
+
+	kv.migrateReqs(args, "StartConfig", func(srv *labrpc.ClientEnd) (bool, int) {
+		var reply ConfigReply
+		ok := srv.Call("ShardKV.StartConfig", &args, &reply)
+		return ok && reply.WrongLeader == false, reply.Leader
+	})
+}
+
 func (kv *ShardKV) endConfig(config shardmaster.Config) {
 	args := ConfigArgs{}
 	args.Config = config
 
-	server := kv.me
-	for {
-		srv := kv.servers[server]
+	kv.migrateReqs(args, "EndConfig", func(srv *labrpc.ClientEnd) (bool, int) {
 		var reply ConfigReply
-		DPrintf("endConfig req to %d, %+v", server, args)
-		//fmt.Printf("startConfig req to %d, %+v\n", server, args)
 		ok := srv.Call("ShardKV.EndConfig", &args, &reply)
-		DPrintf("Done endConfig req to %d, %+v", server, args)
-		//fmt.Printf("Done startConfig req to %d, %+v\n", server, args)
-		if ok && reply.WrongLeader == false {
-			return
-		}
-		server = reply.Leader
-	}
-	time.Sleep(100 * time.Millisecond)
+		return ok && reply.WrongLeader == false, reply.Leader
+	})
 }
 
 func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan struct{}) {
@@ -606,7 +593,7 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 		kv.ShardTrack[shard] = configNum
 		kv.mu.Unlock()
 		break
-	case CONFIG:
+	case STARTCONFIG:
 		config := shardmaster.Config{}
 		r := bytes.NewBuffer(op.Value)
 		d := labgob.NewDecoder(r)
@@ -669,11 +656,14 @@ func (kv *ShardKV) servePendingRPC(apply *raft.ApplyMsg, err Err, value interfac
 }
 
 func (kv *ShardKV) updateClerkTrack(clerkId int64, seqId int) {
+	if clerkId < 0 {
+		return
+	}
 	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	kv.ClerkTrack[clerkId] = seqId
 	v, ok := kv.ClerkTrack[clerkId]
 	DPrintf("updateTrack me: %d gid: %d clerkId:%v seqId:%v ok:%v track:%v %v", kv.me, kv.gid, clerkId, seqId, ok, v, kv.ClerkTrack)
-	kv.mu.Unlock()
 }
 
 func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
@@ -818,7 +808,7 @@ func (kv *ShardKV) Kill() {
 // RPCs to the shardmaster.
 //
 // make_end(servername) turns a server name from a
-// Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
+// StartConfig.Groups[gid][i] into a labrpc.ClientEnd on which you can
 // send RPCs. You'll need this to send RPCs to other groups.
 //
 // look at client.go for examples of how to use masters[]
