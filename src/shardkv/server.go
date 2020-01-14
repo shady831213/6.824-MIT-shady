@@ -273,21 +273,20 @@ func (kv *ShardKV) EndConfig(args *EndConfigArgs, reply *ConfigReply) {
 
 }
 
-func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(*labrpc.ClientEnd) (bool, int)) {
+func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(int) (bool, int)) {
 	server := kv.me
 	for {
-		srv := kv.servers[server]
 		DPrintf("%s req to %d gid: %d, %+v", name, server, kv.gid, args)
 		//fmt.Printf("updateShard req to %d, %+v\n", server, args)
-		ok, leader := rpc(srv)
+		ok, leader := rpc(server)
 		DPrintf("Done %s req to %d gid: %d, %+v", name, server, kv.gid, args)
 		//fmt.Printf("Done updateShard req to %d, %+v\n", server, args)
 		if ok {
 			return
 		}
 		server = leader
+		time.Sleep(100 * time.Millisecond)
 	}
-	time.Sleep(100 * time.Millisecond)
 }
 
 func (kv *ShardKV) updateShard(config shardmaster.Config, shard int, value map[string]string) {
@@ -296,8 +295,13 @@ func (kv *ShardKV) updateShard(config shardmaster.Config, shard int, value map[s
 	args.Shard = shard
 	args.Value = value
 
-	kv.migrateReqs(args, "UpdateShard", func(srv *labrpc.ClientEnd) (bool, int) {
+	kv.migrateReqs(args, "UpdateShard", func(server int) (bool, int) {
 		var reply UpdateShardReply
+		if server == kv.me {
+			kv.UpdateShard(&args, &reply)
+			return reply.WrongLeader == false, reply.Leader
+		}
+		srv := kv.servers[server]
 		ok := srv.Call("ShardKV.UpdateShard", &args, &reply)
 		return ok && reply.WrongLeader == false, reply.Leader
 	})
@@ -307,8 +311,13 @@ func (kv *ShardKV) startConfig(config shardmaster.Config) {
 	args := StartConfigArgs{}
 	args.Config = config
 
-	kv.migrateReqs(args, "StartConfig", func(srv *labrpc.ClientEnd) (bool, int) {
+	kv.migrateReqs(args, "StartConfig", func(server int) (bool, int) {
 		var reply ConfigReply
+		if server == kv.me {
+			kv.StartConfig(&args, &reply)
+			return reply.WrongLeader == false, reply.Leader
+		}
+		srv := kv.servers[server]
 		ok := srv.Call("ShardKV.StartConfig", &args, &reply)
 		return ok && reply.WrongLeader == false, reply.Leader
 	})
@@ -318,8 +327,13 @@ func (kv *ShardKV) endConfig(configNum int) {
 	args := EndConfigArgs{}
 	args.ConfigNum = configNum
 
-	kv.migrateReqs(args, "EndConfig", func(srv *labrpc.ClientEnd) (bool, int) {
+	kv.migrateReqs(args, "EndConfig", func(server int) (bool, int) {
 		var reply ConfigReply
+		if server == kv.me {
+			kv.EndConfig(&args, &reply)
+			return reply.WrongLeader == false, reply.Leader
+		}
+		srv := kv.servers[server]
 		ok := srv.Call("ShardKV.EndConfig", &args, &reply)
 		return ok && reply.WrongLeader == false, reply.Leader
 	})
@@ -341,7 +355,6 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] != kv.gid {
 		for config.Num != kv.shadTrack(shard) {
 		}
-		kv.updateShard(config, shard, make(map[string]string))
 		return
 	}
 

@@ -60,6 +60,11 @@ func (r *Get) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			make(chan struct{})},
 
 		func() bool {
+			if !r.kv.checkGroup(args.Key) {
+				reply.Err = ErrWrongGroup
+				DPrintf("wrongGroup Get me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
+				return false
+			}
 			return true
 		},
 		func(leader int) {
@@ -79,7 +84,7 @@ func (r *Get) execute(op *Op) (interface{}, Err) {
 		}
 	})
 	if !r.kv.checkGroup(key) {
-		DPrintf("wrongGroup Get me: %d gid: %d %+v", r.kv.me, r.kv.gid, op)
+		DPrintf("wrongGroup %s me: %d gid: %d %+v", op.OpCode, r.kv.me, r.kv.gid, op)
 		return "", ErrWrongGroup
 	}
 	v, exist := r.kv.DB[key]
@@ -121,6 +126,11 @@ func (r *PugAppend) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.WrongLeader = true
 				reply.Leader = -1
 				DPrintf("retry PutAppend me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
+				return false
+			}
+			if !r.kv.checkGroup(args.Key) {
+				reply.Err = ErrWrongGroup
+				DPrintf("wrongGroup PutAppend me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
 				return false
 			}
 			return true
