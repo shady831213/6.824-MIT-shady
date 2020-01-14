@@ -161,9 +161,6 @@ func (kv *ShardKV) servePendingRPC(apply *raft.ApplyMsg, err Err, value interfac
 }
 
 func (kv *ShardKV) updateClerkTrack(clerkId int64, seqId int) {
-	if clerkId < 0 {
-		return
-	}
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	kv.ClerkTrack[clerkId] = seqId
@@ -203,7 +200,14 @@ func (kv *ShardKV) checkGroup(key string) bool {
 
 }
 
-func (kv *ShardKV) nextConfig() (shardmaster.Config, bool) {
+func (kv *ShardKV) curConfig() shardmaster.Config {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	config := kv.Config
+	return config
+}
+
+func (kv *ShardKV) tryNextConfig() (shardmaster.Config, bool) {
 	kv.mu.Lock()
 	configNum := kv.Config.Num
 	kv.mu.Unlock()
@@ -416,9 +420,7 @@ func (kv *ShardKV) StartConfig(args *StartConfigArgs, reply *ConfigReply) {
 			make(chan struct{})},
 
 		func() bool {
-			kv.mu.Lock()
-			defer kv.mu.Unlock()
-			if args.Config.Num <= kv.Config.Num {
+			if args.Config.Num <= kv.curConfig().Num {
 				DPrintf("ignore StartConfig me: %d gid: %d %+v", kv.me, kv.gid, args)
 				return false
 			}
@@ -453,9 +455,7 @@ func (kv *ShardKV) EndConfig(args *EndConfigArgs, reply *ConfigReply) {
 			make(chan struct{})},
 
 		func() bool {
-			kv.mu.Lock()
-			defer kv.mu.Unlock()
-			if args.ConfigNum <= kv.Config.Num {
+			if args.ConfigNum <= kv.curConfig().Num {
 				DPrintf("ignore EndConfig me: %d gid: %d %+v", kv.me, kv.gid, args)
 				return false
 			}
@@ -533,20 +533,16 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	args.Shard = shard
 	args.Gid = int64(kv.gid)
 	defer func() { done <- struct{}{} }()
-	kv.mu.Lock()
-	if kv.Config.Shards[shard] == kv.gid || config.Shards[shard] != kv.gid || kv.Config.Num == 0 {
-		kv.mu.Unlock()
+	curConfig := kv.curConfig()
+	if curConfig.Shards[shard] == kv.gid || config.Shards[shard] != kv.gid || curConfig.Num == 0 {
 		kv.updateShard(config, shard, make(map[string]string))
 		return
 	}
-	kv.mu.Unlock()
 
 	for {
 		args.ConfigNum = config.Num
-		kv.mu.Lock()
-		gid := kv.Config.Shards[shard]
-		if servers, ok := kv.Config.Groups[gid]; ok {
-			kv.mu.Unlock()
+		gid := curConfig.Shards[shard]
+		if servers, ok := curConfig.Groups[gid]; ok {
 			//fmt.Printf("GetShard %d req to gid %d me %d, gid %d\n", shard, gid, kv.me, kv.gid)
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
@@ -561,8 +557,6 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 					return
 				}
 			}
-		} else {
-			kv.mu.Unlock()
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -582,6 +576,7 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 			panic(e)
 		}
 		kv.DB[key] = value
+		kv.updateClerkTrack(op.ClerkId, op.SeqId)
 		break
 	case GET:
 		key := ""
@@ -591,6 +586,7 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 			panic(e)
 		}
 		v, exist := kv.DB[key]
+		kv.updateClerkTrack(op.ClerkId, op.SeqId)
 		if !exist {
 			return "", ErrNoKey
 		}
@@ -610,6 +606,7 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 		} else {
 			kv.DB[key] = v + value
 		}
+		kv.updateClerkTrack(op.ClerkId, op.SeqId)
 		break
 	case GETSHARD:
 		shard := 0
@@ -722,7 +719,6 @@ func (kv *ShardKV) commitProcess() {
 			if apply.CommandValid {
 				op, _ := (apply.Command).(Op)
 				value, err = kv.execute(&op)
-				kv.updateClerkTrack(op.ClerkId, op.SeqId)
 				DPrintf("server%d gid%d apply %+v Index:%d", kv.me, kv.gid, op, apply.CommandIndex)
 			}
 			if apply.Snapshot {
@@ -748,7 +744,7 @@ func (kv *ShardKV) updateConfig() {
 	if _, isLeader, _ := kv.rf.GetState(); !isLeader {
 		return
 	}
-	config, update := kv.nextConfig()
+	config, update := kv.tryNextConfig()
 	if !update {
 		return
 	}
