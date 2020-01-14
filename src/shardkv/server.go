@@ -94,6 +94,85 @@ type ShardKV struct {
 	pendingIndex int
 }
 
+func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if snapshot == nil {
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	if e := d.Decode(&kv.DB); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&kv.ClerkTrack); e != nil {
+		panic(e)
+	}
+	if e := d.Decode(&kv.Config); e != nil {
+		panic(e)
+	}
+}
+
+func (kv *ShardKV) encodeSnapshot() []byte {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	s := new(bytes.Buffer)
+	e := labgob.NewEncoder(s)
+	e.Encode(kv.DB)
+	e.Encode(kv.ClerkTrack)
+	e.Encode(kv.Config)
+	return s.Bytes()
+}
+
+func (kv *ShardKV) servePendingRPC(apply *raft.ApplyMsg, err Err, value interface{}) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	DPrintf("servePendingRPC me: %d gid: %d pendingIdex:%d Index:%d", kv.me, kv.gid, kv.pendingIndex, apply.CommandIndex)
+	if apply.CommandIndex == kv.pendingIndex {
+		item := <-kv.committing
+		op, ok := (apply.Command).(Op)
+		DPrintf("commitProcess me: %d gid: %d %+v %+v Index:%d", kv.me, kv.gid, op, item.op, apply.CommandIndex)
+		item.resp(KVRPCResp{
+			op.SeqId != item.op.SeqId || op.ClerkId != item.op.ClerkId || !ok || !apply.CommandValid,
+			op.ServerId,
+			err,
+			value,
+		})
+		close(item.done)
+		return
+	}
+	if apply.CommandIndex > kv.pendingIndex {
+		select {
+		case item := <-kv.committing:
+			DPrintf("commitProcess me: %d gid: %d  %+v Index:%d", kv.me, kv.gid, item.op, apply.CommandIndex)
+			item.resp(KVRPCResp{
+				true,
+				kv.me,
+				err,
+				value,
+			})
+			close(item.done)
+
+		default:
+
+		}
+	}
+
+}
+
+func (kv *ShardKV) updateClerkTrack(clerkId int64, seqId int) {
+	if clerkId < 0 {
+		return
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.ClerkTrack[clerkId] = seqId
+	v, ok := kv.ClerkTrack[clerkId]
+	DPrintf("updateTrack me: %d gid: %d clerkId:%v seqId:%v ok:%v track:%v %v", kv.me, kv.gid, clerkId, seqId, ok, v, kv.ClerkTrack)
+}
+
+
+
 func (kv *ShardKV) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -489,46 +568,6 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	}
 }
 
-func (kv *ShardKV) issue(item KVRPCIssueItem) {
-	if !item.preIssueCheck() {
-		return
-	}
-	kv.mu.Lock()
-	index, _, isLeader, leader := kv.rf.Start(*item.op)
-	if !isLeader {
-		kv.mu.Unlock()
-		item.wrongLeaderHandler(leader)
-		return
-
-	}
-	commit := KVRPCCommitItem{
-		kvRPCItem{
-			item.op,
-			item.resp,
-			make(chan struct{}),
-		},
-	}
-
-	kv.pendingIndex = index
-	kv.mu.Unlock()
-	kv.committing <- commit
-	DPrintf("Waiting commitProcess me: %d gid: %d %+v", kv.me, kv.gid, item.op)
-	<-commit.done
-}
-
-func (kv *ShardKV) issueProcess() {
-	for {
-		select {
-		case item := <-kv.issueing:
-			kv.issue(item)
-			item.done <- struct{}{}
-			DPrintf("issue done me: %d gid: %d %+v", kv.me, kv.gid, item.op)
-			break
-		case <-kv.ctx.Done():
-			return
-		}
-	}
-}
 
 func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 	switch op.OpCode {
@@ -633,81 +672,45 @@ func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
 	return "", OK
 }
 
-func (kv *ShardKV) servePendingRPC(apply *raft.ApplyMsg, err Err, value interface{}) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	DPrintf("servePendingRPC me: %d gid: %d pendingIdex:%d Index:%d", kv.me, kv.gid, kv.pendingIndex, apply.CommandIndex)
-	if apply.CommandIndex == kv.pendingIndex {
-		item := <-kv.committing
-		op, ok := (apply.Command).(Op)
-		DPrintf("commitProcess me: %d gid: %d %+v %+v Index:%d", kv.me, kv.gid, op, item.op, apply.CommandIndex)
-		item.resp(KVRPCResp{
-			op.SeqId != item.op.SeqId || op.ClerkId != item.op.ClerkId || !ok || !apply.CommandValid,
-			op.ServerId,
-			err,
-			value,
-		})
-		close(item.done)
+func (kv *ShardKV) issue(item KVRPCIssueItem) {
+	if !item.preIssueCheck() {
 		return
 	}
-	if apply.CommandIndex > kv.pendingIndex {
+	kv.mu.Lock()
+	index, _, isLeader, leader := kv.rf.Start(*item.op)
+	if !isLeader {
+		kv.mu.Unlock()
+		item.wrongLeaderHandler(leader)
+		return
+
+	}
+	commit := KVRPCCommitItem{
+		kvRPCItem{
+			item.op,
+			item.resp,
+			make(chan struct{}),
+		},
+	}
+
+	kv.pendingIndex = index
+	kv.mu.Unlock()
+	kv.committing <- commit
+	DPrintf("Waiting commitProcess me: %d gid: %d %+v", kv.me, kv.gid, item.op)
+	<-commit.done
+}
+
+func (kv *ShardKV) issueProcess() {
+	for {
 		select {
-		case item := <-kv.committing:
-			DPrintf("commitProcess me: %d gid: %d  %+v Index:%d", kv.me, kv.gid, item.op, apply.CommandIndex)
-			item.resp(KVRPCResp{
-				true,
-				kv.me,
-				err,
-				value,
-			})
-			close(item.done)
-
-		default:
-
+		case item := <-kv.issueing:
+			kv.issue(item)
+			item.done <- struct{}{}
+			DPrintf("issue done me: %d gid: %d %+v", kv.me, kv.gid, item.op)
+			break
+		case <-kv.ctx.Done():
+			return
 		}
 	}
-
-}
-
-func (kv *ShardKV) updateClerkTrack(clerkId int64, seqId int) {
-	if clerkId < 0 {
-		return
-	}
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	kv.ClerkTrack[clerkId] = seqId
-	v, ok := kv.ClerkTrack[clerkId]
-	DPrintf("updateTrack me: %d gid: %d clerkId:%v seqId:%v ok:%v track:%v %v", kv.me, kv.gid, clerkId, seqId, ok, v, kv.ClerkTrack)
-}
-
-func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if snapshot == nil {
-		return
-	}
-	r := bytes.NewBuffer(snapshot)
-	d := labgob.NewDecoder(r)
-	if e := d.Decode(&kv.DB); e != nil {
-		panic(e)
-	}
-	if e := d.Decode(&kv.ClerkTrack); e != nil {
-		panic(e)
-	}
-	if e := d.Decode(&kv.Config); e != nil {
-		panic(e)
-	}
-}
-
-func (kv *ShardKV) encodeSnapshot() []byte {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	s := new(bytes.Buffer)
-	e := labgob.NewEncoder(s)
-	e.Encode(kv.DB)
-	e.Encode(kv.ClerkTrack)
-	e.Encode(kv.Config)
-	return s.Bytes()
 }
 
 func (kv *ShardKV) commitProcess() {
