@@ -81,20 +81,25 @@ type SMRPCResp struct {
 	value       interface{}
 }
 
+func (sm *ShardMaster) updateBooting(term int) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.booting {
+		t, _, _ := sm.rf.GetState()
+		if term >= t {
+			sm.booting = false
+		}
+	}
+}
+
 func (sm *ShardMaster) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	v, ok := sm.ClerkTrack[clerkId]
-	//when restart
-	if !ok && sedId > 0 || sedId > v+1 {
+	if !ok && sedId > 0 || sedId > v+1 || sm.booting {
 		return ClerkRetry
 	}
-	//for restart corner case
 	if !ok && sedId == 0 || sedId == v+1 {
-		if sm.booting {
-			sm.booting = false
-			return ClerkRetry
-		}
 		return ClerkOK
 	}
 	return ClerkIgnore
@@ -122,6 +127,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 		func() bool {
 			switch sm.checkClerkTrack(args.ClerkId, args.SeqId) {
 			case ClerkIgnore:
+				reply.Err = OK
 				DPrintf("ignore Join me: %d %+v %+v", sm.me, args, reply)
 				return false
 			case ClerkRetry:
@@ -166,6 +172,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 		func() bool {
 			switch sm.checkClerkTrack(args.ClerkId, args.SeqId) {
 			case ClerkIgnore:
+				reply.Err = OK
 				DPrintf("ignore Leave me: %d %+v %+v", sm.me, args, reply)
 				return false
 			case ClerkRetry:
@@ -211,6 +218,7 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 		func() bool {
 			switch sm.checkClerkTrack(args.ClerkId, args.SeqId) {
 			case ClerkIgnore:
+				reply.Err = OK
 				DPrintf("ignore Move me: %d %+v %+v", sm.me, args, reply)
 				return false
 			case ClerkRetry:
@@ -504,6 +512,7 @@ func (sm *ShardMaster) commitProcess() {
 					sm.rf.Snapshot(apply.CommandIndex, sm.encodeSnapshot())
 				}
 			}
+			sm.updateBooting(apply.CommandTerm)
 			DPrintf("server%d apply Index:%d done", sm.me, apply.CommandIndex)
 			break
 		case <-sm.ctx.Done():

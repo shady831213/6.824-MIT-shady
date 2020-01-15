@@ -49,7 +49,6 @@ func (r *Get) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.Err = resp.err
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
-				reply.Value = resp.value.(string)
 				if value, ok := resp.value.(string); !ok {
 					reply.Value = ""
 				} else {
