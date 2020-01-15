@@ -62,6 +62,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm int
 	StageSize    int
 	Snapshot     bool
 }
@@ -278,16 +279,16 @@ func (rf *Raft) apply() {
 	RaftDebug("server", rf.me, "apply, lastAppliy", rf.lastApplied, "commitIndex", rf.commitIndex)
 	if rf.lastApplied < rf.commitIndex {
 		if rf.lastApplied <= rf.snapshot.Index && rf.snapshot.Index != 0 {
-			entries = append(entries, ApplyMsg{false, rf.snapshot.Data, rf.snapshot.Index, 0, true})
+			entries = append(entries, ApplyMsg{false, rf.snapshot.Data, rf.snapshot.Index, rf.snapshot.Term, 0, true})
 			lastApplied = rf.snapshot.Index + 1
 		}
 		if lastApplied <= rf.commitIndex {
 			commitEntris := rf.logs[rf.logPosition(lastApplied) : rf.logPosition(rf.commitIndex)+1]
 			for i, e := range commitEntris {
 				if i == len(commitEntris)-1 {
-					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command, lastApplied + i, rf.persister.RaftStateSize(), false})
+					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command,lastApplied + i, e.Term, rf.persister.RaftStateSize(), false})
 				} else {
-					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command, lastApplied + i, 0, false})
+					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command, lastApplied + i, e.Term, 0, false})
 				}
 			}
 

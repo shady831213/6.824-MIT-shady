@@ -158,10 +158,15 @@ func (kv *ShardKV) updateShadTrack(shard int, configNum int) {
 	kv.ShardTrack[shard] = configNum
 }
 
-func (kv *ShardKV) bootDone() {
+func (kv *ShardKV) updateBooting(term int) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	kv.booting = false
+	if kv.booting {
+		t, _, _ := kv.rf.GetState()
+		if term >= t {
+			kv.booting = false
+		}
+	}
 }
 
 func (kv *ShardKV) isKilled() bool {
@@ -286,10 +291,8 @@ func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(int) (boo
 	server := kv.me
 	for {
 		DPrintf("%s req to %d gid: %d, %+v", name, server, kv.gid, args)
-		//fmt.Printf("updateShard req to %d, %+v\n", server, args)
 		ok, leader := rpc(server)
 		DPrintf("Done %s req to %d gid: %d, %+v", name, server, kv.gid, args)
-		//fmt.Printf("Done updateShard req to %d, %+v\n", server, args)
 		if ok {
 			return
 		}
@@ -382,16 +385,13 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 		gid := curConfig.Shards[shard]
 		if servers, ok := curConfig.Groups[gid]; ok {
 			DPrintf("GetShard %d req to gid %d me %d, gid %d, %+v", shard, gid, kv.me, kv.gid, curConfig)
-			//fmt.Printf("GetShard %d req to gid %d me %d, gid %d\n", shard, gid, kv.me, kv.gid)
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
 				var reply GetShardReply
 				DPrintf("GetShard req to %s, %+v", servers[si], args)
-				//fmt.Printf("GetShard req to %s, %+v\n", servers[si], args)
 				ok := srv.Call("ShardKV.GetShard", &args, &reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
-					//fmt.Printf("Done GetShard req to %s, %+v\n", servers[si], args)
 					kv.updateShard(config, shard, reply.Value)
 					return
 				}
@@ -498,8 +498,9 @@ func (kv *ShardKV) commitProcess() {
 			}
 			if apply.Snapshot {
 				snapshot, _ := (apply.Command).([]byte)
-				DPrintf("install snapshot before decode me: %d gid: %d %+v", kv.me, kv.gid, kv.DB)
+				DPrintf("install snapshot before decode me: %d gid: %d %+v config:%+v", kv.me, kv.gid, kv.DB, kv.curConfig())
 				kv.decodeSnapshot(snapshot)
+				DPrintf("install snapshot after decode me: %d gid: %d %+v config:%+v", kv.me, kv.gid, kv.DB, kv.curConfig())
 			} else {
 				kv.servePendingRPC(&apply, err, value)
 				if apply.StageSize >= kv.maxraftstate && kv.maxraftstate > 0 {
@@ -508,7 +509,7 @@ func (kv *ShardKV) commitProcess() {
 				}
 			}
 			DPrintf("server%d gid%d apply Index:%d done", kv.me, kv.gid, apply.CommandIndex)
-			kv.bootDone()
+			kv.updateBooting(apply.CommandTerm)
 			break
 		case <-kv.ctx.Done():
 			return
@@ -524,25 +525,20 @@ func (kv *ShardKV) updateConfig() {
 	if !update {
 		return
 	}
-	DPrintf("begin startConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
-	//fmt.Printf("begin startConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+	DPrintf("begin startConfig me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
 	kv.startConfig(config)
-	DPrintf("begin updateShark me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
-	//fmt.Printf("begin updateShark me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+	DPrintf("begin updateShark me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
 	dones := make(chan struct{}, shardmaster.NShards)
 	for i := 0; i < shardmaster.NShards; i ++ {
 		go kv.getShard(config, i, dones)
 	}
 	for i := 0; i < shardmaster.NShards; i ++ {
 		<-dones
-		DPrintf("end 1 updateShark me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
-		//fmt.Printf("end 1 updateShark me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+		DPrintf("end 1 updateShark me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
 	}
-	DPrintf("begin endConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
-	//fmt.Printf("begin endConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+	DPrintf("begin endConfig me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
 	kv.endConfig(config.Num)
-	DPrintf("end endConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
-	//fmt.Printf("end endConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+	DPrintf("end endConfig me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
 }
 
 func (kv *ShardKV) pollConfig() {
@@ -583,7 +579,6 @@ func (kv *ShardKV) Kill() {
 	default:
 	}
 	DPrintf("server%d gid%d killed", kv.me, kv.gid)
-	//fmt.Printf("server%d gid%d killed\n", kv.me, kv.gid)
 
 }
 
@@ -649,15 +644,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.pendingIndex = 0
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
-	//if snapshot := kv.rf.GetSnapshot();snapshot.Index != 0 {
-	//	kv.decodeSnapshot(snapshot.Data)
-	//}
 	// You may need initialization code here.
 	go kv.commitProcess()
 	go kv.issueProcess()
 	go kv.pollConfig()
 	DPrintf("server%d gid%d started", kv.me, kv.gid)
-	//fmt.Printf("server%d gid%d started\n", kv.me, kv.gid)
 
 	// Use something like this to talk to the shardmaster:
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
