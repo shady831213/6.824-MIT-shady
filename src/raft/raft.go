@@ -62,7 +62,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-	CommandTerm int
+	CommandTerm  int
 	StageSize    int
 	Snapshot     bool
 }
@@ -88,7 +88,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
-
+	Tag       string
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -255,14 +255,29 @@ func (rf *Raft) makeSnapshot(index int, term int, snapshotData []byte) {
 	if index <= rf.snapshot.Index {
 		return
 	}
+	//_, file, line, _ := runtime.Caller(0)
+	//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 	if rf.logPosition(index) < len(rf.logs) {
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.snapshot.Term = rf.logs[rf.logPosition(index)].Term
+		//_, file, line, _ = runtime.Caller(0)
+		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
+		//fmt.Printf("%s%d before set logs %+v %s, %d\n", rf.Tag, rf.me, rf.logs, file, line)
 		rf.logs = append([]RaftLogEntry{{0, 0}}, rf.logs[rf.logPosition(index+1):]...)
+		//fmt.Printf("%s%d after set logs %+v  %s, %d\n", rf.Tag, rf.me, rf.logs, file, line)
+
 	} else {
 		rf.snapshot.Term = term
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
+		//fmt.Printf("%s%d before set logs %+v  index:%d snapshot index:%d term:%+v %s, %d\n", rf.Tag, rf.me, rf.logs, index, rf.snapshot.Index, term, file, line)
 		rf.logs = []RaftLogEntry{{0, 0}}
+		//panic(fmt.Sprintf("%s%d after set logs %+v  %s, %d", rf.Tag, rf.me, rf.logs, file, line))
 	}
 	rf.snapshot.Data = snapshotData
+	//_, file, line, _ = runtime.Caller(0)
+	//fmt.Printf("%s%d change snapshot from %d to %d %s, %d\n", rf.Tag, rf.me, rf.snapshot.Index, index, file, line)
 	rf.snapshot.Index = index
 	rf.persist()
 }
@@ -283,10 +298,13 @@ func (rf *Raft) apply() {
 			lastApplied = rf.snapshot.Index + 1
 		}
 		if lastApplied <= rf.commitIndex {
+			//fmt.Println("server", rf.Tag, rf.me, "logs", rf.logs, "start", rf.logPosition(lastApplied), lastApplied, "end", rf.logPosition(rf.commitIndex), rf.commitIndex, "snapshotIdex", rf.snapshot.Index)
+			//_, file, line, _ := runtime.Caller(0)
+			//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 			commitEntris := rf.logs[rf.logPosition(lastApplied) : rf.logPosition(rf.commitIndex)+1]
 			for i, e := range commitEntris {
 				if i == len(commitEntris)-1 {
-					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command,lastApplied + i, e.Term, rf.persister.RaftStateSize(), false})
+					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command, lastApplied + i, e.Term, rf.persister.RaftStateSize(), false})
 				} else {
 					entries = append(entries, ApplyMsg{e.Command != DummyRaftCommand, e.Command, lastApplied + i, e.Term, 0, false})
 				}
@@ -336,6 +354,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.installSnapshotRespCh = make(chan *installSnapshotResp, len(rf.peers))
 	rf.currentTerm = 0
 	rf.votedFor = -1
+	//_, file, line, _ := runtime.Caller(0)
+	//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 	rf.logs = []RaftLogEntry{{0, 0}}
 	rf.commitIndex = 0
 	rf.lastApplied = 0

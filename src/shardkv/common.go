@@ -78,6 +78,7 @@ type GetShardArgs struct {
 
 type GetShardReply struct {
 	Value       map[string]string
+	Track       map[int64]int
 	WrongLeader bool
 	Err         Err
 	Leader      int
@@ -88,6 +89,7 @@ type UpdateShardArgs struct {
 	ConfigNum int
 	Shard     int
 	Value     map[string]string
+	Track     map[int64]int
 }
 
 type UpdateShardReply struct {

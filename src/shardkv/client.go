@@ -93,7 +93,7 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		args.SeqId = ck.curSeqId[gid]
+		args.SeqId = ck.curSeqId[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -103,7 +103,7 @@ func (ck *Clerk) Get(key string) string {
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				DPrintf("Done Get req to %s, %+v", servers[si], args)
 				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
-					ck.curSeqId[gid] ++
+					ck.curSeqId[shard] ++
 					DPrintf("Success Get req to %s, %+v, config:%+v", servers[si], args, ck.config)
 					return reply.Value
 				}
@@ -133,7 +133,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
-		args.SeqId = ck.curSeqId[gid]
+		args.SeqId = ck.curSeqId[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
@@ -142,7 +142,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				DPrintf("Done PutAppend req to %s, %+v", servers[si], args)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
-					ck.curSeqId[gid] ++
+					ck.curSeqId[shard] ++
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {

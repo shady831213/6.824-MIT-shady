@@ -87,7 +87,7 @@ func (r *Get) execute(op *Op) (interface{}, Err) {
 		return "", ErrWrongGroup
 	}
 	v, exist := r.kv.DB[key]
-	r.kv.updateClerkTrack(op.ClerkId, op.SeqId)
+	r.kv.updateClerkTrack(key2shard(key), op.ClerkId, op.SeqId)
 	if !exist {
 		return "", ErrNoKey
 	}
@@ -117,7 +117,7 @@ func (r *PugAppend) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			make(chan struct{})},
 
 		func() bool {
-			switch r.kv.checkClerkTrack(args.ClerkId, args.SeqId) {
+			switch r.kv.checkClerkTrack(key2shard(args.Key), args.ClerkId, args.SeqId) {
 			case ClerkIgnore:
 				reply.Err = OK
 				DPrintf("ignore PutAppend me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
@@ -162,7 +162,7 @@ func (r *PugAppend) execute(op *Op) (interface{}, Err) {
 	switch op.OpCode {
 	case PUT:
 		r.kv.DB[key] = value
-		r.kv.updateClerkTrack(op.ClerkId, op.SeqId)
+		r.kv.updateClerkTrack(key2shard(key), op.ClerkId, op.SeqId)
 		break
 	case APPEND:
 		if v, exist := r.kv.DB[key]; !exist {
@@ -170,7 +170,7 @@ func (r *PugAppend) execute(op *Op) (interface{}, Err) {
 		} else {
 			r.kv.DB[key] = v + value
 		}
-		r.kv.updateClerkTrack(op.ClerkId, op.SeqId)
+		r.kv.updateClerkTrack(key2shard(key), op.ClerkId, op.SeqId)
 		break
 	}
 	return "", OK
@@ -178,6 +178,11 @@ func (r *PugAppend) execute(op *Op) (interface{}, Err) {
 
 type GetShard struct {
 	ShardKVRPCBase
+}
+
+type GetShardValue struct {
+	Value map[string]string
+	Track map[int64]int
 }
 
 func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
@@ -194,26 +199,29 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.Err = resp.err
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
-				if value, ok := resp.value.(map[string]string);!ok {
-					reply.Value= make(map[string]string)
+				if value, ok := resp.value.(GetShardValue); !ok {
+					reply.Value = make(map[string]string)
+					reply.Track = make(map[int64]int)
 				} else {
-					reply.Value = value
+					reply.Value = value.Value
+					reply.Track = value.Track
 				}
 				DPrintf("reply GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
-				//fmt.Printf("reply GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
 
 		func() bool {
-			if args.ConfigNum != r.kv.nextConfig().Num {
-				reply.WrongLeader = true
-				reply.Leader = -1
-				DPrintf("retry GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
-				//fmt.Printf("retry GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+			if args.ConfigNum < r.kv.shadTrack(args.Shard) {
+				reply.Err = OK
+				DPrintf("ignore GetShard me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
 				return false
 			}
-			//fmt.Printf("get GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
+			if args.ConfigNum > r.kv.nextConfig().Num {
+				reply.WrongLeader = true
+				DPrintf("retry GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
+				return false
+			}
 			return true
 		},
 
@@ -222,7 +230,6 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			reply.WrongLeader = true
 			reply.Leader = leader
 			DPrintf("NotLeader GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
-			//fmt.Printf("NotLeader GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 		},
 	}
@@ -230,7 +237,7 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 
 func (r *GetShard) execute(op *Op) (interface{}, Err) {
 	shard := 0
-	value := make(map[string]string)
+	value := GetShardValue{make(map[string]string), make(map[int64]int)}
 	r.decodeArgs(op.Value, func(d *labgob.LabDecoder) {
 		if e := d.Decode(&shard); e != nil {
 			panic(e)
@@ -239,9 +246,13 @@ func (r *GetShard) execute(op *Op) (interface{}, Err) {
 
 	for k, v := range r.kv.DB {
 		if key2shard(k) == shard {
-			value[k] = v
+			value.Value[k] = v
 		}
 	}
+	for k, v := range r.kv.ClerkTrack[shard] {
+		value.Track[k] = v
+	}
+
 	r.kv.updateShadTrack(shard, op.SeqId)
 	return value, OK
 }
@@ -259,18 +270,18 @@ func (r *UpdateShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				e.Encode(args.Shard)
 				e.Encode(args.ConfigNum)
 				e.Encode(args.Value)
+				e.Encode(args.Track)
 			}),},
 			func(resp KVRPCResp) {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				DPrintf("reply UpdateShard me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
-				////fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
 
 		func() bool {
-			if !r.kv.checkShadTrack(args.Shard, args.ConfigNum) {
+			if args.ConfigNum <= r.kv.shadTrack(args.Shard) {
 				DPrintf("ignore UpdateShard me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
 				return false
 			}
@@ -281,7 +292,6 @@ func (r *UpdateShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			reply.WrongLeader = true
 			reply.Leader = leader
 			DPrintf("NotLeader UpdateShard me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
-			////fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 		},
 	}
@@ -291,6 +301,8 @@ func (r *UpdateShard) execute(op *Op) (interface{}, Err) {
 	shard := 0
 	configNum := 0
 	value := make(map[string]string)
+	track := make(map[int64]int)
+
 	r.decodeArgs(op.Value, func(d *labgob.LabDecoder) {
 		if e := d.Decode(&shard); e != nil {
 			panic(e)
@@ -301,10 +313,16 @@ func (r *UpdateShard) execute(op *Op) (interface{}, Err) {
 		if e := d.Decode(&value); e != nil {
 			panic(e)
 		}
+		if e := d.Decode(&track); e != nil {
+			panic(e)
+		}
 	})
 
 	for k, v := range value {
 		r.kv.DB[k] = v
+	}
+	for k, v := range track {
+		r.kv.updateClerkTrack(shard, k, v)
 	}
 	r.kv.updateShadTrack(shard, configNum)
 	return nil, OK
@@ -326,7 +344,6 @@ func (r *StartConfig) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				DPrintf("reply StartConfig me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
-				////fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
@@ -343,8 +360,6 @@ func (r *StartConfig) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			reply.WrongLeader = true
 			reply.Leader = leader
 			DPrintf("NotLeader StartConfig me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
-			////fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
-
 		},
 	}
 }
@@ -374,8 +389,6 @@ func (r *EndConfig) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				DPrintf("reply EndConfig me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
-				////fmt.Printf("reply Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
-
 			},
 			make(chan struct{})},
 
@@ -391,8 +404,6 @@ func (r *EndConfig) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			reply.WrongLeader = true
 			reply.Leader = leader
 			DPrintf("NotLeader EndConfig me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
-			////fmt.Printf("NotLeader Migrate me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
-
 		},
 	}
 }

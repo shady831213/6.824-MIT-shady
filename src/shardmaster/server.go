@@ -565,7 +565,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	labgob.Register(Op{})
 	sm.applyCh = make(chan raft.ApplyMsg)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh, true)
-
+	sm.rf.Tag = "config"
 	// Your code here.
 	sm.booting = true
 	sm.chash = CHash{}

@@ -116,9 +116,13 @@ func (rf *Raft) sendOneAppendEntriesOrInstallSnapshot(server int) {
 	lastTerm := snapshot.Term
 	if !sendSnapshot {
 		if lastIndex != snapshot.Index {
+			//_, file, line, _ := runtime.Caller(0)
+			//fmt.Printf("%s%d get logs %+v index:%d snapshotindex: %d %s, %d\n", rf.Tag, rf.me, rf.logs, lastIndex, snapshot.Index, file, line)
 			lastTerm = rf.logs[rf.logPosition(lastIndex)].Term
 		}
 		if rf.logIndex(len(rf.logs)-1) > lastIndex {
+			//_, file, line, _ := runtime.Caller(0)
+			//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 			entries = append(entries, rf.logs[rf.logPosition(lastIndex+1):]...)
 		}
 	}
@@ -209,8 +213,12 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	}
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "logs", rf.logs, "entries", req.args.Entries)
 	//not exist
+	//_, file, line, _ := runtime.Caller(0)
+	//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 	if req.args.PrevLogIndex > rf.logIndex(len(rf.logs)-1) {
 		req.reply.Success = false
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		req.reply.ConflictIndex = rf.logIndex(len(rf.logs))
 		req.reply.ConflictTerm = -1
 		return
@@ -230,10 +238,14 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	}
 
 	if req.args.PrevLogIndex > rf.snapshot.Index {
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		if entry := rf.logs[rf.logPosition(req.args.PrevLogIndex)]; entry.Term != req.args.PrevLogTerm {
 			req.reply.Success = false
 			req.reply.ConflictTerm = entry.Term
 			for i := rf.logPosition(req.args.PrevLogIndex); i >= 0; i -- {
+				//_, file, line, _ := runtime.Caller(0)
+				//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 				if rf.logs[i].Term != req.reply.ConflictTerm {
 					req.reply.ConflictIndex = rf.logIndex(i + 1)
 					break
@@ -248,9 +260,13 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	//conflict all solved above, just attach
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "can update entries")
 	if req.args.PrevLogIndex < rf.logIndex(len(rf.logs)-1) {
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.logs = append(rf.logs[:rf.logPosition(req.args.PrevLogIndex+1)], req.args.Entries...)
 	} else {
 		//rf.logs all committed
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.logs = append(rf.logs, req.args.Entries...)
 	}
 
@@ -261,6 +277,8 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 
 	//update commitIndex
 	if req.args.LeaderCommit > rf.commitIndex {
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.commitIndex = rf.logIndex(len(rf.logs) - 1)
 		if req.args.LeaderCommit < rf.commitIndex {
 			rf.commitIndex = req.args.LeaderCommit
@@ -290,31 +308,33 @@ func (rf *Raft) installSnapshot(req *installSnapshotReq) {
 		return
 	}
 	RaftDebug("server", rf.me, "get installSnapshot rpc from", req.args.LeaderId, "LastIncludedIndex", req.args.LastIncludedIndex, "LastIncludedTerm", req.args.LastIncludedTerm)
-	if req.args.LastIncludedIndex > rf.snapshot.Index {
-		//if rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term != req.args.LastIncludedTerm {
-		//	panic(fmt.Sprint("installSnapshot term conflict,", rf.logs[rf.logPosition(req.args.LastIncludedIndex)].Term, req.args.LastIncludedTerm))
-		//}
-		//println("server", rf.me, "make snapshot though installSnapshot rpc")
-		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
-		//println("server", rf.me, "make snapshot though installSnapshot rpc")
-	} else if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
-		//fmt.Printf("snapshot to be installed: %+v\n", req.args)
-		//println()
-		//fmt.Printf("snapshot: %+v\n", rf.snapshot)
-		//println()
-		//panic(fmt.Sprint("server ", rf.me, "installSnapshot term conflict from ", req.args.LeaderId, rf.snapshot.Term, req.args.LastIncludedTerm))
-		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
-	}
-	//update commitIndex
-	if req.args.LastIncludedIndex > rf.commitIndex {
-		rf.commitIndex = req.args.LastIncludedIndex
-		RaftDebug("server", rf.me, "update commitIndex through installSnapshot success from", req.args.LeaderId, rf.commitIndex, req.args.LastIncludedIndex)
+	defer func() {
+		//update commitIndex
+		if req.args.LastIncludedIndex > rf.commitIndex {
+			rf.commitIndex = req.args.LastIncludedIndex
+			RaftDebug("server", rf.me, "update commitIndex through installSnapshot success from", req.args.LeaderId, rf.commitIndex, req.args.LastIncludedIndex)
 
-		go func() {
-			rf.canApply <- struct{}{}
-		}()
+			go func() {
+				rf.canApply <- struct{}{}
+			}()
+		}
+		rf.leader = req.args.LeaderId
+	}()
+	for i, e := range rf.logs {
+		if e.Term == req.args.LastIncludedTerm && rf.logIndex(i) == req.args.LastIncludedIndex {
+			//rf.makeSnapshot(req.args.LastIncludedIndex-1, req.args.LastIncludedTerm, req.args.Data)
+			return
+		}
 	}
-	rf.leader = req.args.LeaderId
+	if req.args.LastIncludedIndex > rf.snapshot.Index {
+		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
+	}
+	//if req.args.LastIncludedIndex > rf.snapshot.Index {
+	//	rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
+	//} else if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
+	//	rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
+	//}
+
 
 }
 
@@ -356,6 +376,8 @@ func (rf *Raft) updateCommitIndex(index int) {
 		}
 		RaftDebug("server", rf.me, "update commitIndex as leader ", index, count, fmt.Sprintf("%+v", rf.matchedIndex))
 		//Figure8, section 5.4.2
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		if count > len(rf.peers)/2 && rf.logs[rf.logPosition(index)].Term == rf.currentTerm || count == len(rf.peers)-1 {
 			rf.commitIndex = index
 			go func() {
@@ -610,10 +632,14 @@ func (rf *Raft) leaderState() {
 	//for Figure 8 may cause deadlock when entry leader, and it's discribed in section 8
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.nextIndex[i] = rf.logIndex(len(rf.logs))
 	}
 	rf.matchedIndex = make([]int, len(rf.peers))
 	if rf.dummyCmdEn {
+		//_, file, line, _ := runtime.Caller(0)
+		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.logs = append(rf.logs, RaftLogEntry{DummyRaftCommand, rf.currentTerm})
 		rf.persist()
 	}
@@ -638,6 +664,8 @@ func (rf *Raft) leaderState() {
 				req.reply.role = RaftLeader
 				req.reply.index = rf.logIndex(len(rf.logs))
 				close(req.done)
+				//_, file, line, _ := runtime.Caller(0)
+				//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 				rf.logs = append(rf.logs, RaftLogEntry{req.command, rf.currentTerm})
 				rf.persist()
 			})
@@ -662,10 +690,7 @@ func (rf *Raft) leaderState() {
 			return rf.backToFollower(resp.reply.Term)
 		},
 		appendEntriesReqAction: func(req *appendEntriesReq) bool {
-			return rf.backToFollower(req.args.Term, func() {
-				//println("server", rf.me, "get append req from", req.args.LeaderId, "term", req.args.Term)
-				rf.appendEntries(req)
-			})
+			return rf.backToFollower(req.args.Term)
 		},
 		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
 			if rf.backToFollower(resp.reply.Term) {
@@ -692,11 +717,13 @@ func (rf *Raft) leaderState() {
 					//fmt.Println("resp.reply.ConflictIndex", resp.reply.ConflictIndex, "resp.reply.Term", resp.reply.Term, "term", rf.currentTerm, "reply from", resp.server, "to", rf.me)
 					panic("resp.reply.ConflictIndex < 1 only when leader term < follower term, leader should have return to follower already!")
 				}
-				if resp.reply.ConflictTerm < 0 {
+				if resp.reply.ConflictTerm < 0 || resp.reply.ConflictIndex < rf.snapshot.Index {
 					rf.nextIndex[resp.server] = resp.reply.ConflictIndex
 				} else {
 					conflictIndex := resp.reply.ConflictIndex
 					for i := rf.nextIndex[resp.server] - 1; i >= 0; i-- {
+						//_, file, line, _ := runtime.Caller(0)
+						//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 						if rf.logs[rf.logPosition(i)].Term == resp.reply.ConflictTerm {
 							conflictIndex = i + 1
 							break

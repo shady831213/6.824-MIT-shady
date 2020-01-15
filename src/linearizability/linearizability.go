@@ -240,9 +240,9 @@ func CheckOperationsTimeout(model Model, history []Operation, timeout time.Durat
 	kill := int32(0)
 	for _, subhistory := range partitions {
 		l := makeLinkedEntries(makeEntries(subhistory))
-		go func() {
+		go func(s []Operation) {
 			results <- checkSingle(model, l, &kill)
-		}()
+		}(subhistory)
 	}
 	var timeoutChan <-chan time.Time
 	if timeout > 0 {

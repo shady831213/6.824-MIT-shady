@@ -7,6 +7,7 @@ import (
 	"labrpc"
 	"raft"
 	"shardmaster"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -85,7 +86,7 @@ type ShardKV struct {
 	NextConfig   shardmaster.Config
 	booting      bool
 	DB           map[string]string
-	ClerkTrack   map[int64]int
+	ClerkTrack   [shardmaster.NShards]map[int64]int
 	ShardTrack   [shardmaster.NShards]int
 	ctx          context.Context
 	cancel       func()
@@ -120,12 +121,16 @@ func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 	if e := d.Decode(&kv.ClerkTrack); e != nil {
 		panic(e)
 	}
-	if e := d.Decode(&kv.Config); e != nil {
+	config := shardmaster.Config{}
+	if e := d.Decode(&config); e != nil {
 		panic(e)
 	}
-	if e := d.Decode(&kv.NextConfig); e != nil {
+	kv.Config = config
+	nConfig := shardmaster.Config{}
+	if e := d.Decode(&nConfig); e != nil {
 		panic(e)
 	}
+	kv.NextConfig = nConfig
 	if e := d.Decode(&kv.ShardTrack); e != nil {
 		panic(e)
 	}
@@ -142,20 +147,6 @@ func (kv *ShardKV) encodeSnapshot() []byte {
 	e.Encode(kv.NextConfig)
 	e.Encode(kv.ShardTrack)
 	return s.Bytes()
-}
-
-func (kv *ShardKV) updateClerkTrack(clerkId int64, seqId int) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	kv.ClerkTrack[clerkId] = seqId
-	v, ok := kv.ClerkTrack[clerkId]
-	DPrintf("updateTrack me: %d gid: %d clerkId:%v seqId:%v ok:%v track:%v %v", kv.me, kv.gid, clerkId, seqId, ok, v, kv.ClerkTrack)
-}
-
-func (kv *ShardKV) updateShadTrack(shard int, configNum int) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	kv.ShardTrack[shard] = configNum
 }
 
 func (kv *ShardKV) updateBooting(term int) {
@@ -178,11 +169,25 @@ func (kv *ShardKV) isKilled() bool {
 	}
 }
 
-func (kv *ShardKV) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
+func (kv *ShardKV) updateClerkTrack(shard int, clerkId int64, seqId int) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	v, ok := kv.ClerkTrack[clerkId]
-	DPrintf("checkClerkTrack me: %d gid: %d clerkId:%v, ok:%v seqId:%d, v:%d, %v", kv.me, kv.gid, clerkId, ok, sedId, v, kv.ClerkTrack)
+	kv.ClerkTrack[shard][clerkId] = seqId
+	v, ok := kv.ClerkTrack[shard][clerkId]
+	DPrintf("updateTrack me: %d gid: %d clerkId:%v shard:%d seqId:%v ok:%v track:%v %v", kv.me, kv.gid, clerkId, shard, seqId, ok, v, kv.ClerkTrack)
+}
+
+func (kv *ShardKV) updateShadTrack(shard int, configNum int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.ShardTrack[shard] = configNum
+}
+
+func (kv *ShardKV) checkClerkTrack(shard int, clerkId int64, sedId int) ClerkTrackAction {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	v, ok := kv.ClerkTrack[shard][clerkId]
+	DPrintf("checkClerkTrack me: %d gid: %d clerkId:%v shard:%d ok:%v seqId:%d, v:%d, %v", kv.me, kv.gid, clerkId, shard, ok, sedId, v, kv.ClerkTrack)
 	if !ok && sedId > 0 || sedId > v+1 || kv.booting {
 		return ClerkRetry
 	}
@@ -197,13 +202,6 @@ func (kv *ShardKV) shadTrack(shard int) int {
 	defer kv.mu.Unlock()
 	configNum := kv.ShardTrack[shard]
 	return configNum
-}
-
-func (kv *ShardKV) checkShadTrack(shard int, configNum int) bool {
-	if configNum <= kv.shadTrack(shard) {
-		return false
-	}
-	return true
 }
 
 func (kv *ShardKV) checkGroup(key string) bool {
@@ -236,7 +234,15 @@ func (kv *ShardKV) curConfig() shardmaster.Config {
 func (kv *ShardKV) nextConfig() shardmaster.Config {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	config := kv.NextConfig
+	config := shardmaster.Config{}
+	config.Num = kv.NextConfig.Num
+	for k, v := range kv.NextConfig.Shards {
+		config.Shards[k] = v
+	}
+	config.Groups = make(map[int][]string)
+	for k, v := range kv.NextConfig.Groups {
+		config.Groups[k] = v
+	}
 	return config
 }
 
@@ -308,11 +314,12 @@ func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(int) (boo
 	}
 }
 
-func (kv *ShardKV) updateShard(config shardmaster.Config, shard int, value map[string]string) {
+func (kv *ShardKV) updateShard(config shardmaster.Config, shard int, value map[string]string, track map[int64]int) {
 	args := UpdateShardArgs{}
 	args.ConfigNum = config.Num
 	args.Shard = shard
 	args.Value = value
+	args.Track = track
 
 	kv.migrateReqs(args, "UpdateShard", func(server int) (bool, int) {
 		var reply UpdateShardReply
@@ -367,7 +374,7 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] == kv.gid ||
 		curConfig.Shards[shard] != kv.gid && config.Shards[shard] != kv.gid ||
 		curConfig.Num == 0 {
-		kv.updateShard(config, shard, make(map[string]string))
+		kv.updateShard(config, shard, make(map[string]string), make(map[int64]int))
 		return
 	}
 
@@ -392,7 +399,7 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 				ok := srv.Call("ShardKV.GetShard", &args, &reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
-					kv.updateShard(config, shard, reply.Value)
+					kv.updateShard(config, shard, reply.Value, reply.Track)
 					return
 				}
 				if kv.isKilled() {
@@ -505,6 +512,7 @@ func (kv *ShardKV) commitProcess() {
 				kv.servePendingRPC(&apply, err, value)
 				if apply.StageSize >= kv.maxraftstate && kv.maxraftstate > 0 {
 					DPrintf("make snapshot me: %d gid: %d Index:%d stageSize %d %+v", kv.me, kv.gid, apply.CommandIndex, apply.StageSize, kv.DB)
+
 					kv.rf.Snapshot(apply.CommandIndex, kv.encodeSnapshot())
 				}
 			}
@@ -614,6 +622,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(shardmaster.Config{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -635,8 +644,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.sm = shardmaster.MakeClerk(masters)
 	kv.servers = servers
 	kv.booting = true
+	kv.Config = shardmaster.Config{}
+	kv.NextConfig = shardmaster.Config{}
 	kv.DB = make(map[string]string)
-	kv.ClerkTrack = make(map[int64]int)
+	kv.ClerkTrack = [shardmaster.NShards]map[int64]int{}
+	for s := range kv.ClerkTrack {
+		kv.ClerkTrack[s] = make(map[int64]int)
+	}
 	kv.ShardTrack = [shardmaster.NShards]int{}
 	kv.issueing = make(chan KVRPCIssueItem)
 	kv.committing = make(chan KVRPCCommitItem, 1)
@@ -644,6 +658,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.pendingIndex = 0
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, true)
+	kv.rf.Tag = strconv.Itoa(gid)
 	// You may need initialization code here.
 	go kv.commitProcess()
 	go kv.issueProcess()
