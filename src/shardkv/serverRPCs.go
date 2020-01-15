@@ -120,6 +120,7 @@ func (r *PugAppend) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 		func() bool {
 			switch r.kv.checkClerkTrack(args.ClerkId, args.SeqId) {
 			case ClerkIgnore:
+				reply.Err = OK
 				DPrintf("ignore PutAppend me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
 				return false
 			case ClerkRetry:
@@ -194,7 +195,11 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.Err = resp.err
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
-				reply.Value = resp.value.(map[string]string)
+				if value, ok := resp.value.(map[string]string);!ok {
+					reply.Value= make(map[string]string)
+				} else {
+					reply.Value = value
+				}
 				DPrintf("reply GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
 				//fmt.Printf("reply GetShard me: %d gid: %d %+v %+v\n", kv.me, kv.gid, args, reply)
 

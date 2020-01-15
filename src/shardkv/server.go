@@ -158,21 +158,30 @@ func (kv *ShardKV) updateShadTrack(shard int, configNum int) {
 	kv.ShardTrack[shard] = configNum
 }
 
+func (kv *ShardKV) bootDone() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.booting = false
+}
+
+func (kv *ShardKV) isKilled() bool {
+	select {
+	case <-kv.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func (kv *ShardKV) checkClerkTrack(clerkId int64, sedId int) ClerkTrackAction {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	v, ok := kv.ClerkTrack[clerkId]
 	DPrintf("checkClerkTrack me: %d gid: %d clerkId:%v, ok:%v seqId:%d, v:%d, %v", kv.me, kv.gid, clerkId, ok, sedId, v, kv.ClerkTrack)
-	//when restart
-	if !ok && sedId > 0 || sedId > v+1 {
+	if !ok && sedId > 0 || sedId > v+1 || kv.booting {
 		return ClerkRetry
 	}
-	//for restart corner case
 	if !ok && sedId == 0 || sedId == v+1 {
-		if kv.booting {
-			kv.booting = false
-			return ClerkRetry
-		}
 		return ClerkOK
 	}
 	return ClerkIgnore
@@ -240,10 +249,9 @@ func (kv *ShardKV) updateNextConfig(config shardmaster.Config) {
 
 func (kv *ShardKV) tryNextConfig() (shardmaster.Config, bool) {
 	kv.mu.Lock()
-	configNum := kv.Config.Num
-	kv.mu.Unlock()
-	config := kv.sm.Query(configNum + 1)
-	return config, config.Num > configNum
+	defer kv.mu.Unlock()
+	config := kv.sm.Query(kv.Config.Num + 1)
+	return config, config.Num > kv.Config.Num && !kv.booting
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -285,12 +293,14 @@ func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(int) (boo
 		if ok {
 			return
 		}
-		select {
-		case <-kv.ctx.Done():
+		if kv.isKilled() {
 			return
-		default:
 		}
-		server = leader
+		if leader < 0 {
+			server = kv.me
+		} else {
+			server = leader
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -360,10 +370,8 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 
 	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] != kv.gid {
 		for config.Num != kv.shadTrack(shard) {
-			select {
-			case <-kv.ctx.Done():
+			if kv.isKilled() {
 				return
-			default:
 			}
 		}
 		return
@@ -387,10 +395,8 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 					kv.updateShard(config, shard, reply.Value)
 					return
 				}
-				select {
-				case <-kv.ctx.Done():
+				if kv.isKilled() {
 					return
-				default:
 				}
 			}
 		}
@@ -502,6 +508,7 @@ func (kv *ShardKV) commitProcess() {
 				}
 			}
 			DPrintf("server%d gid%d apply Index:%d done", kv.me, kv.gid, apply.CommandIndex)
+			kv.bootDone()
 			break
 		case <-kv.ctx.Done():
 			return
@@ -517,15 +524,25 @@ func (kv *ShardKV) updateConfig() {
 	if !update {
 		return
 	}
+	DPrintf("begin startConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+	//fmt.Printf("begin startConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
 	kv.startConfig(config)
+	DPrintf("begin updateShark me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+	//fmt.Printf("begin updateShark me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
 	dones := make(chan struct{}, shardmaster.NShards)
 	for i := 0; i < shardmaster.NShards; i ++ {
 		go kv.getShard(config, i, dones)
 	}
 	for i := 0; i < shardmaster.NShards; i ++ {
 		<-dones
+		DPrintf("end 1 updateShark me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+		//fmt.Printf("end 1 updateShark me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
 	}
+	DPrintf("begin endConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+	//fmt.Printf("begin endConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
 	kv.endConfig(config.Num)
+	DPrintf("end endConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
+	//fmt.Printf("end endConfig me: %d gid: %d cur:%+v, next:%+v, track:%+v\n", kv.me, kv.gid, kv.curConfig(), config, kv.ShardTrack)
 }
 
 func (kv *ShardKV) pollConfig() {
@@ -566,6 +583,8 @@ func (kv *ShardKV) Kill() {
 	default:
 	}
 	DPrintf("server%d gid%d killed", kv.me, kv.gid)
+	//fmt.Printf("server%d gid%d killed\n", kv.me, kv.gid)
+
 }
 
 //
@@ -638,6 +657,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.issueProcess()
 	go kv.pollConfig()
 	DPrintf("server%d gid%d started", kv.me, kv.gid)
+	//fmt.Printf("server%d gid%d started\n", kv.me, kv.gid)
+
 	// Use something like this to talk to the shardmaster:
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
 
