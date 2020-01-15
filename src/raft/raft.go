@@ -276,7 +276,7 @@ func (rf *Raft) makeSnapshot(index int, term int, snapshotData []byte) {
 		//panic(fmt.Sprintf("%s%d after set logs %+v  %s, %d", rf.Tag, rf.me, rf.logs, file, line))
 	}
 	rf.snapshot.Data = snapshotData
-	//_, file, line, _ = runtime.Caller(0)
+	//_, file, line, _ := runtime.Caller(0)
 	//fmt.Printf("%s%d change snapshot from %d to %d %s, %d\n", rf.Tag, rf.me, rf.snapshot.Index, index, file, line)
 	rf.snapshot.Index = index
 	rf.persist()

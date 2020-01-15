@@ -115,7 +115,7 @@ func (rf *Raft) sendOneAppendEntriesOrInstallSnapshot(server int) {
 	sendSnapshot := lastIndex < snapshot.Index
 	lastTerm := snapshot.Term
 	if !sendSnapshot {
-		if lastIndex != snapshot.Index {
+		if lastIndex > snapshot.Index {
 			//_, file, line, _ := runtime.Caller(0)
 			//fmt.Printf("%s%d get logs %+v index:%d snapshotindex: %d %s, %d\n", rf.Tag, rf.me, rf.logs, lastIndex, snapshot.Index, file, line)
 			lastTerm = rf.logs[rf.logPosition(lastIndex)].Term
@@ -326,11 +326,7 @@ func (rf *Raft) installSnapshot(req *installSnapshotReq) {
 			return
 		}
 	}
-	if req.args.LastIncludedIndex > rf.snapshot.Index {
-		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
-	} else if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
-		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
-	}
+	rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
 }
 
 func (rf *Raft) doActions(actions ...func()) {
@@ -349,8 +345,9 @@ func (rf *Raft) setRole(role RaftRole, actions ...func()) {
 
 //update term and set role must be atomic
 func (rf *Raft) backToFollower(term int, actions ...func()) bool {
-	update := false
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	update := false
 	if rf.currentTerm < term {
 		rf.votedFor = -1
 		rf.currentTerm = term
@@ -358,8 +355,9 @@ func (rf *Raft) backToFollower(term int, actions ...func()) bool {
 		update = true
 		rf.persist()
 	}
-	rf.mu.Unlock()
-	rf.doActions(actions...)
+	for _, f := range actions {
+		f()
+	}
 	return update
 }
 
@@ -751,7 +749,9 @@ func (rf *Raft) leaderState() {
 				return true
 			}
 			rf.setRole(RaftLeader, func() {
-				rf.nextIndex[resp.server] = rf.snapshot.Index + 1
+				if resp.args.LastIncludedIndex + 1 > rf.nextIndex[resp.server] {
+					rf.nextIndex[resp.server] = resp.args.LastIncludedIndex + 1
+				}
 				go rf.sendOneAppendEntriesOrInstallSnapshot(resp.server)
 			})
 			return false
