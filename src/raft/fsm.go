@@ -109,7 +109,8 @@ func (rf *Raft) sendOneInstallSnapshot(server int, term int, snapshot RaftSnapSh
 func (rf *Raft) sendOneAppendEntriesOrInstallSnapshot(server int) {
 	var entries []RaftLogEntry
 	rf.mu.Lock()
-	term, role, snapshot := rf.currentTerm, rf.role, rf.snapshot
+	term, role := rf.currentTerm, rf.role
+	snapshot := RaftSnapShot{rf.snapshot.Index, rf.snapshot.Term, rf.snapshot.Data}
 	lastIndex := rf.nextIndex[server] - 1
 	commitIndex := rf.commitIndex
 	sendSnapshot := lastIndex < snapshot.Index
@@ -749,7 +750,7 @@ func (rf *Raft) leaderState() {
 				return true
 			}
 			rf.setRole(RaftLeader, func() {
-				if resp.args.LastIncludedIndex + 1 > rf.nextIndex[resp.server] {
+				if resp.args.LastIncludedIndex+1 > rf.nextIndex[resp.server] {
 					rf.nextIndex[resp.server] = resp.args.LastIncludedIndex + 1
 				}
 				go rf.sendOneAppendEntriesOrInstallSnapshot(resp.server)
