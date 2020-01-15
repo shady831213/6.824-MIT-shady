@@ -328,14 +328,9 @@ func (rf *Raft) installSnapshot(req *installSnapshotReq) {
 	}
 	if req.args.LastIncludedIndex > rf.snapshot.Index {
 		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
+	} else if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
+		rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
 	}
-	//if req.args.LastIncludedIndex > rf.snapshot.Index {
-	//	rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
-	//} else if req.args.LastIncludedIndex == rf.snapshot.Index && req.args.LastIncludedTerm != rf.snapshot.Term {
-	//	rf.makeSnapshot(req.args.LastIncludedIndex, req.args.LastIncludedTerm, req.args.Data)
-	//}
-
-
 }
 
 func (rf *Raft) doActions(actions ...func()) {
@@ -690,7 +685,14 @@ func (rf *Raft) leaderState() {
 			return rf.backToFollower(resp.reply.Term)
 		},
 		appendEntriesReqAction: func(req *appendEntriesReq) bool {
-			return rf.backToFollower(req.args.Term)
+			if rf.backToFollower(req.reply.Term) {
+				rf.doActions(func() {
+					rf.appendEntries(req)
+				})
+				//println("server", rf.me, "get append resp term", resp.reply.Term)
+				return true
+			}
+			return false
 		},
 		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
 			if rf.backToFollower(resp.reply.Term) {

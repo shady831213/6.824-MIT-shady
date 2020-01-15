@@ -626,7 +626,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv := new(ShardKV)
 	kv.me = me
-	kv.maxraftstate = maxraftstate
+	kv.maxraftstate = -1
 	kv.make_end = make_end
 	kv.gid = gid
 	kv.masters = masters

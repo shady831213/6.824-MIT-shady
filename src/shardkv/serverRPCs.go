@@ -212,11 +212,6 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			make(chan struct{})},
 
 		func() bool {
-			if args.ConfigNum < r.kv.shadTrack(args.Shard) {
-				reply.Err = OK
-				DPrintf("ignore GetShard me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
-				return false
-			}
 			if args.ConfigNum > r.kv.nextConfig().Num {
 				reply.WrongLeader = true
 				DPrintf("retry GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
