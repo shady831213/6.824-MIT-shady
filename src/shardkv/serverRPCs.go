@@ -214,18 +214,18 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			make(chan struct{})},
 
 		func() bool {
-			track := r.kv.shadTrack(args.Shard)
-			if args.ConfigNum < track.ConfigNum || args.ConfigNum == track.ConfigNum && track.State > ShardGet {
-				reply.Err = ErrAlreadyDone
-				DPrintf("ignore GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
-				//fmt.Printf("ignore GetShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
-				return false
-			}
 			if args.ConfigNum > r.kv.nextConfig().Num {
 				reply.Server = r.kv.me
 				reply.WrongLeader = true
 				DPrintf("retry GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
 				//fmt.Printf("retry GetShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
+				return false
+			}
+			track := r.kv.shadTrack(args.Shard)
+			if args.ConfigNum == track.ConfigNum && track.State > ShardGet {
+				reply.Err = ErrAlreadyDone
+				DPrintf("ignore GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, track)
+				//fmt.Printf("ignore GetShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, track)
 				return false
 			}
 
@@ -298,13 +298,13 @@ func (r *DeleteShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				//fmt.Printf("ignore DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
 				return false
 			}
-			if args.ConfigNum == track.ConfigNum && track.State < ShardGet {
-				reply.Server = r.kv.me
-				reply.WrongLeader = true
-				DPrintf("retry DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
-				//fmt.Printf("retry DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
-				return false
-			}
+			//if args.ConfigNum == track.ConfigNum && track.State < ShardGet || args.ConfigNum > r.kv.nextConfig().Num {
+			//	reply.Server = r.kv.me
+			//	reply.WrongLeader = true
+			//	DPrintf("retry DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
+			//	//fmt.Printf("retry DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
+			//	return false
+			//}
 			return true
 		},
 

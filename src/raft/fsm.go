@@ -68,7 +68,6 @@ func (rf *Raft) sendOneAppendEntries(server int,
 	commitIndex int,
 	entries []RaftLogEntry) {
 	RaftDebug("server", rf.me, "before send appendEntries to", server)
-	//println("server", rf.me,"before send appendEntries to", server, "entries", fmt.Sprintf("%+v", entries))
 
 	args := AppendEntriesArgs{
 		Term:         term,
@@ -117,18 +116,11 @@ func (rf *Raft) sendOneAppendEntriesOrInstallSnapshot(server int) {
 	lastTerm := snapshot.Term
 	if !sendSnapshot {
 		if lastIndex > snapshot.Index {
-			//_, file, line, _ := runtime.Caller(0)
-			//fmt.Printf("%s%d get logs %+v index:%d snapshotindex: %d %s, %d\n", rf.Tag, rf.me, rf.logs, lastIndex, snapshot.Index, file, line)
-			//lastTerm = rf.logs[rf.logPosition(lastIndex)].Term
 			lastTerm = rf.logs[lastIndex-snapshot.Index].Term
 		}
 		if rf.logIndex(len(rf.logs)-1) > lastIndex {
-			//_, file, line, _ := runtime.Caller(0)
-			//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
-			//entries = append(entries, rf.logs[rf.logPosition(lastIndex+1):]...)
 			entries = append(entries, rf.logs[lastIndex-snapshot.Index+1:]...)
 		}
-		//fmt.Printf("%s%d get logs %+v lastIndex:%d lastTerm:%d snapshot: %+v entries:%+v\n", rf.Tag, rf.me, rf.logs, lastIndex, lastTerm, snapshot, entries)
 	}
 	rf.mu.Unlock()
 	if role == RaftLeader {
@@ -201,7 +193,6 @@ func (rf *Raft) requestVote(req *requestVoteReq) {
 	req.reply.VoteGranted = true
 	rf.votedFor = req.args.CandidateId
 	rf.persist()
-	//fmt.Printf("server %s%d vote to %d, args:%+v, logs:%+v\n", rf.Tag, rf.me, req.args.CandidateId, req.args, rf.logs)
 }
 
 func (rf *Raft) appendEntries(req *appendEntriesReq) {
@@ -216,13 +207,8 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		return
 	}
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "PrevLogIndex", req.args.PrevLogIndex, "logs", rf.logs, "entries", req.args.Entries)
-	//not exist
-	//_, file, line, _ := runtime.Caller(0)
-	//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 	if req.args.PrevLogIndex > rf.logIndex(len(rf.logs)-1) {
 		req.reply.Success = false
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		req.reply.ConflictIndex = rf.logIndex(len(rf.logs))
 		req.reply.ConflictTerm = -1
 		return
@@ -242,14 +228,10 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	}
 
 	if req.args.PrevLogIndex > rf.snapshot.Index {
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		if entry := rf.logs[rf.logPosition(req.args.PrevLogIndex)]; entry.Term != req.args.PrevLogTerm {
 			req.reply.Success = false
 			req.reply.ConflictTerm = entry.Term
 			for i := rf.logPosition(req.args.PrevLogIndex); i > 0; i -- {
-				//_, file, line, _ := runtime.Caller(0)
-				//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 				if rf.logs[i].Term != req.reply.ConflictTerm {
 					req.reply.ConflictIndex = rf.logIndex(i + 1)
 					return
@@ -270,8 +252,6 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 	//conflict all solved above, just attach
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "can update entries")
 	if req.args.PrevLogIndex < rf.logIndex(len(rf.logs)-1) {
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 		for i, e := range req.args.Entries{
 			if rf.logPosition(req.args.PrevLogIndex+i+1) > len(rf.logs) - 1 || e.Term != rf.logs[rf.logPosition(req.args.PrevLogIndex+i+1)].Term {
 				rf.logs = append(rf.logs[:rf.logPosition(req.args.PrevLogIndex+i+1)], req.args.Entries[i:]...)
@@ -280,15 +260,12 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 		}
 	} else {
 		//rf.logs all committed
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.logs = append(rf.logs, req.args.Entries...)
 	}
 
 	rf.persist()
 	//append new entries
 	RaftDebug("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "logs", rf.logs, "entries", req.args.Entries)
-	//println("server", rf.me, "get appendEntries rpc from", req.args.LeaderId, "logs", rf.logs, "entries", fmt.Sprintf("%+v", req.args.Entries))
 
 	//update commitIndex
 	if req.args.LeaderCommit > rf.commitIndex {
@@ -301,12 +278,6 @@ func (rf *Raft) appendEntries(req *appendEntriesReq) {
 			rf.canApply <- struct{}{}
 		}()
 	}
-	//if rf.logPosition(rf.commitIndex) > len(rf.logs)-1 {
-	//	panic(fmt.Sprintf("%s%d update commit to %d log %+v snapshotindex %d", rf.Tag, rf.me, rf.commitIndex, rf.logs, rf.snapshot.Index))
-	//}
-	//println("server", rf.me, "update commitIndex as follower", rf.commitIndex, "log len =", len(rf.logs))
-	//fmt.Printf("logs %+v\n", rf.logs)
-	//println()
 	rf.leader = req.args.LeaderId
 	req.reply.Success = true
 
@@ -390,8 +361,6 @@ func (rf *Raft) updateCommitIndex(index int) {
 		}
 		RaftDebug("server", rf.me, "update commitIndex as leader ", index, count, fmt.Sprintf("%+v", rf.matchedIndex))
 		//Figure8, section 5.4.2
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		if count > len(rf.peers)/2 && rf.logs[rf.logPosition(index)].Term == rf.currentTerm || count == len(rf.peers)-1 {
 			rf.commitIndex = index
 			go func() {
@@ -640,7 +609,6 @@ func (rf *Raft) candidateState() {
 				return true
 			}
 			if resp.reply.VoteGranted {
-				//fmt.Println("server ", rf.Tag, rf.me, "get request vote response and get a vote from", resp.server)
 				if rf.currentTerm == resp.reply.Term {
 					votes++
 					if votes > len(rf.peers)/2 {
@@ -663,7 +631,6 @@ func (rf *Raft) candidateState() {
 		},
 		installSnapshotReqAction: func(req *installSnapshotReq) bool {
 			return rf.backToFollower(req.args.Term, func() {
-				//println("server", rf.me, "get append req from", req.args.LeaderId, "term", req.args.Term)
 				rf.installSnapshot(req)
 			})
 		},
@@ -678,14 +645,10 @@ func (rf *Raft) leaderState() {
 	//for Figure 8 may cause deadlock when entry leader, and it's discribed in section 8
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.nextIndex[i] = rf.logIndex(len(rf.logs))
 	}
 	rf.matchedIndex = make([]int, len(rf.peers))
 	if rf.dummyCmdEn {
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.logs = append(rf.logs, RaftLogEntry{DummyRaftCommand, rf.currentTerm})
 		rf.persist()
 	}
@@ -710,8 +673,6 @@ func (rf *Raft) leaderState() {
 				req.reply.role = RaftLeader
 				req.reply.index = rf.logIndex(len(rf.logs))
 				close(req.done)
-				//_, file, line, _ := runtime.Caller(0)
-				//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 				rf.logs = append(rf.logs, RaftLogEntry{req.command, rf.currentTerm})
 				rf.persist()
 			})
@@ -727,12 +688,10 @@ func (rf *Raft) leaderState() {
 		},
 		requestVoteReqAction: func(req *requestVoteReq) bool {
 			return rf.backToFollower(req.args.Term, func() {
-				//println("server", rf.me, "get vote req from", req.args.CandidateId, "term", req.args.Term)
 				rf.requestVote(req)
 			})
 		},
 		requestVoteRespAction: func(resp *requestVoteResp) bool {
-			//println("server", rf.me, "get vote resp term", resp.reply.Term)
 			return rf.backToFollower(resp.reply.Term)
 		},
 		appendEntriesReqAction: func(req *appendEntriesReq) bool {
@@ -740,14 +699,12 @@ func (rf *Raft) leaderState() {
 				rf.doActions(func() {
 					rf.appendEntries(req)
 				})
-				//println("server", rf.me, "get append resp term", resp.reply.Term)
 				return true
 			}
 			return false
 		},
 		appendEntriesRespAction: func(resp *appendEntriesResp) bool {
 			if rf.backToFollower(resp.reply.Term) {
-				//println("server", rf.me, "get append resp term", resp.reply.Term)
 				return true
 			}
 			if resp.reply.Success {
@@ -771,7 +728,6 @@ func (rf *Raft) leaderState() {
 					return
 				}
 				if resp.reply.ConflictIndex < 1 {
-					//fmt.Println("resp.reply.ConflictIndex", resp.reply.ConflictIndex, "resp.reply.Term", resp.reply.Term, "term", rf.currentTerm, "reply from", resp.server, "to", rf.me)
 					panic("resp.reply.ConflictIndex < 1 only when leader term < follower term, leader should have return to follower already!")
 				}
 				if resp.reply.ConflictTerm < 0 || resp.reply.ConflictIndex < rf.snapshot.Index {
@@ -779,8 +735,6 @@ func (rf *Raft) leaderState() {
 				} else {
 					conflictIndex := resp.reply.ConflictIndex
 					for i := rf.nextIndex[resp.server] - 1; i >= 0; i-- {
-						//_, file, line, _ := runtime.Caller(0)
-						//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 						if i <= rf.snapshot.Index {
 							conflictIndex = rf.snapshot.Index
 							break
@@ -803,7 +757,6 @@ func (rf *Raft) leaderState() {
 		},
 		installSnapshotRespAction: func(resp *installSnapshotResp) bool {
 			if rf.backToFollower(resp.reply.Term) {
-				//println("server", rf.me, "get append resp term", resp.reply.Term)
 				return true
 			}
 			rf.setRole(RaftLeader, func() {

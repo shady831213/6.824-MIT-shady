@@ -291,8 +291,6 @@ func (rf *Raft) apply() {
 			if rf.logPosition(lastApplied) > len(rf.logs)-1 || rf.logPosition(rf.commitIndex) > len(rf.logs)-1 {
 				panic(fmt.Sprint("server", rf.Tag, rf.me, "logslen", len(rf.logs), "start", rf.logPosition(lastApplied), lastApplied, "end", rf.logPosition(rf.commitIndex), rf.commitIndex, "snapshotIdex", rf.snapshot.Index))
 			}
-			//_, file, line, _ := runtime.Caller(0)
-			//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 			commitEntris := rf.logs[rf.logPosition(lastApplied) : rf.logPosition(rf.commitIndex)+1]
 			for i, e := range commitEntris {
 				if i == len(commitEntris)-1 {
@@ -346,8 +344,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.installSnapshotRespCh = make(chan *installSnapshotResp, len(rf.peers))
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	//_, file, line, _ := runtime.Caller(0)
-	//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
 	rf.logs = []RaftLogEntry{{0, 0}}
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -361,9 +357,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
-	//if rf.snapshot.Index != 0 {
-	//	go rf.applySnapshot()
-	//}
 	rf.ctx, rf.cancel = context.WithCancel(context.Background())
 
 	go rf.fsm()

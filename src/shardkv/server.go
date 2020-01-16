@@ -460,9 +460,8 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
 					//fmt.Printf("Done GetShard req to %s, %+v %+v\n", servers[si], args, reply)
-
-					kv.deleteShard(config, shard)
 					kv.updateShard(config, shard, reply.Value, reply.Track)
+					kv.deleteShard(config, shard)
 					return
 				}
 				if kv.isKilled() || ok && reply.WrongLeader == false && reply.Err == ErrAlreadyDone {
