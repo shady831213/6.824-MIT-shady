@@ -27,6 +27,7 @@ const (
 	OK            = "OK"
 	ErrNoKey      = "ErrNoKey"
 	ErrWrongGroup = "ErrWrongGroup"
+	ErrAlreadyDone = "ErrAlreadyDone"
 )
 
 const NOLEADER = "NoLeader"

@@ -126,6 +126,7 @@ func (r *PugAppend) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.WrongLeader = true
 				reply.Leader = -1
 				DPrintf("retry PutAppend me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
+				//fmt.Printf("retry PutAppend me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, reply)
 				return false
 			}
 			if !r.kv.checkGroup(args.Key) {
@@ -207,17 +208,27 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 					reply.Track = value.Track
 				}
 				DPrintf("reply GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
+				//fmt.Printf("reply GetShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
 
 		func() bool {
+			track := r.kv.shadTrack(args.Shard)
+			if args.ConfigNum < track.ConfigNum || args.ConfigNum == track.ConfigNum && track.State > ShardGet {
+				reply.Err = ErrAlreadyDone
+				DPrintf("ignore GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
+				//fmt.Printf("ignore GetShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
+				return false
+			}
 			if args.ConfigNum > r.kv.nextConfig().Num {
 				reply.Server = r.kv.me
 				reply.WrongLeader = true
 				DPrintf("retry GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
+				//fmt.Printf("retry GetShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
 				return false
 			}
+
 			return true
 		},
 
@@ -226,6 +237,7 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			reply.WrongLeader = true
 			reply.Leader = leader
 			DPrintf("NotLeader GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
+			//fmt.Printf("NotLeader GetShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, reply)
 
 		},
 	}
@@ -249,7 +261,7 @@ func (r *GetShard) execute(op *Op) (interface{}, Err) {
 		value.Track[k] = v
 	}
 
-	r.kv.updateShadTrack(shard, op.SeqId)
+	r.kv.updateShadTrack(shard, ShardTrackItem{op.SeqId, ShardGet})
 	return value, OK
 }
 
@@ -272,16 +284,24 @@ func (r *DeleteShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				DPrintf("reply DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
+				//fmt.Printf("reply DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, reply)
 
 			},
 			make(chan struct{})},
 
 		func() bool {
 			//fmt.Printf("check DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
-			if args.ConfigNum != r.kv.shadTrack(args.Shard) {
+			track := r.kv.shadTrack(args.Shard)
+			if args.ConfigNum < track.ConfigNum || args.ConfigNum == track.ConfigNum && (track.State == ShardInit || track.State >= ShardDelete) {
+				reply.Err = OK
+				DPrintf("ignore DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
+				//fmt.Printf("ignore DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
+				return false
+			}
+			if args.ConfigNum == track.ConfigNum && track.State < ShardGet {
 				reply.Server = r.kv.me
 				reply.WrongLeader = true
-				//DPrintf("retry DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard)
+				DPrintf("retry DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
 				//fmt.Printf("retry DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
 				return false
 			}
@@ -293,6 +313,7 @@ func (r *DeleteShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 			reply.WrongLeader = true
 			reply.Leader = leader
 			DPrintf("NotLeader DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
+			//fmt.Printf("NotLeader DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, reply)
 
 		},
 	}
@@ -315,6 +336,7 @@ func (r *DeleteShard) execute(op *Op) (interface{}, Err) {
 	r.kv.mu.Lock()
 	r.kv.ClerkTrack[shard] = make(map[int64]int)
 	r.kv.mu.Unlock()
+	r.kv.updateShadTrack(shard, ShardTrackItem{op.SeqId, ShardDelete})
 	return value, OK
 }
 
@@ -337,12 +359,14 @@ func (r *UpdateShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 				reply.WrongLeader = resp.wrongLeader
 				reply.Leader = resp.leader
 				DPrintf("reply UpdateShard me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
+				//fmt.Printf("reply UpdateShard me: %d gid: %d %+v\n", r.kv.me, r.kv.gid, args)
 
 			},
 			make(chan struct{})},
 
 		func() bool {
-			if args.ConfigNum <= r.kv.shadTrack(args.Shard) {
+			track := r.kv.shadTrack(args.Shard)
+			if args.ConfigNum <= track.ConfigNum {
 				DPrintf("ignore UpdateShard me: %d gid: %d %+v", r.kv.me, r.kv.gid, args)
 				return false
 			}
@@ -385,7 +409,7 @@ func (r *UpdateShard) execute(op *Op) (interface{}, Err) {
 	for k, v := range track {
 		r.kv.updateClerkTrack(shard, k, v)
 	}
-	r.kv.updateShadTrack(shard, configNum)
+	r.kv.updateShadTrack(shard, ShardTrackItem{configNum, ShardInit})
 	return nil, OK
 }
 

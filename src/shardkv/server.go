@@ -34,6 +34,15 @@ const (
 	ClerkRetry
 )
 
+type ShardState int
+
+const (
+	_ ShardState = iota
+	ShardInit
+	ShardGet
+	ShardDelete
+)
+
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
@@ -68,6 +77,11 @@ type KVRPCResp struct {
 	value       interface{}
 }
 
+type ShardTrackItem struct {
+	ConfigNum int
+	State     ShardState
+}
+
 type ShardKV struct {
 	mu           sync.Mutex
 	me           int
@@ -88,7 +102,7 @@ type ShardKV struct {
 	booting      bool
 	DB           map[string]string
 	ClerkTrack   [shardmaster.NShards]map[int64]int
-	ShardTrack   [shardmaster.NShards]int
+	ShardTrack   [shardmaster.NShards]ShardTrackItem
 	ctx          context.Context
 	cancel       func()
 	issueing     chan KVRPCIssueItem
@@ -178,10 +192,10 @@ func (kv *ShardKV) updateClerkTrack(shard int, clerkId int64, seqId int) {
 	DPrintf("updateTrack me: %d gid: %d clerkId:%v shard:%d seqId:%v ok:%v track:%v %v", kv.me, kv.gid, clerkId, shard, seqId, ok, v, kv.ClerkTrack)
 }
 
-func (kv *ShardKV) updateShadTrack(shard int, configNum int) {
+func (kv *ShardKV) updateShadTrack(shard int, item ShardTrackItem) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	kv.ShardTrack[shard] = configNum
+	kv.ShardTrack[shard] = item
 }
 
 func (kv *ShardKV) checkClerkTrack(shard int, clerkId int64, sedId int) ClerkTrackAction {
@@ -190,6 +204,7 @@ func (kv *ShardKV) checkClerkTrack(shard int, clerkId int64, sedId int) ClerkTra
 	v, ok := kv.ClerkTrack[shard][clerkId]
 	DPrintf("checkClerkTrack me: %d gid: %d clerkId:%v shard:%d ok:%v seqId:%d, v:%d, %v", kv.me, kv.gid, clerkId, shard, ok, sedId, v, kv.ClerkTrack)
 	if !ok && sedId > 0 || sedId > v+1 || kv.booting {
+		//fmt.Printf("checkClerkTrack me: %d gid: %d clerkId:%v shard:%d ok:%v seqId:%d, v:%d, %v\n", kv.me, kv.gid, clerkId, shard, ok, sedId, v, kv.ClerkTrack)
 		return ClerkRetry
 	}
 	if !ok && sedId == 0 || sedId == v+1 {
@@ -198,11 +213,11 @@ func (kv *ShardKV) checkClerkTrack(shard int, clerkId int64, sedId int) ClerkTra
 	return ClerkIgnore
 }
 
-func (kv *ShardKV) shadTrack(shard int) int {
+func (kv *ShardKV) shadTrack(shard int) ShardTrackItem {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	configNum := kv.ShardTrack[shard]
-	return configNum
+	i := kv.ShardTrack[shard]
+	return i
 }
 
 func (kv *ShardKV) checkGroup(key string) bool {
@@ -382,13 +397,18 @@ func (kv *ShardKV) deleteShard(config shardmaster.Config, shard int) {
 		gid := curConfig.Shards[shard]
 		if servers, ok := curConfig.Groups[gid]; ok {
 			DPrintf("DeleteShard %d req to gid %d me %d, gid %d, %+v", shard, gid, kv.me, kv.gid, curConfig)
+			//fmt.Printf("DeleteShard %d req to gid %d me %d, gid %d, %+v\n", shard, gid, kv.me, kv.gid, curConfig)
+
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
 				var reply DeleteShardReply
 				DPrintf("DeleteShard req to %s, %+v", servers[si], args)
+				//fmt.Printf("DeleteShard req to %s, %+v\n", servers[si], args)
+
 				ok := srv.Call("ShardKV.DeleteShard", &args, &reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					DPrintf("Done DeleteShard req to %s, %+v", servers[si], args)
+					//fmt.Printf("Done DeleteShard req to %s, %+v %+v\n", servers[si], args, reply)
 					return
 				}
 				if kv.isKilled() {
@@ -414,11 +434,12 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 	}
 
 	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] != kv.gid {
-		for config.Num != kv.shadTrack(shard) {
+		for track := kv.shadTrack(shard); config.Num != track.ConfigNum || track.State != ShardDelete; track = kv.shadTrack(shard) {
 			if kv.isKilled() {
 				return
 			}
 		}
+		kv.updateShard(config, shard, make(map[string]string), make(map[int64]int))
 		return
 	}
 
@@ -427,18 +448,26 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 		gid := curConfig.Shards[shard]
 		if servers, ok := curConfig.Groups[gid]; ok {
 			DPrintf("GetShard %d req to gid %d me %d, gid %d, %+v", shard, gid, kv.me, kv.gid, curConfig)
+			//fmt.Printf("GetShard %d req to gid %d me %d, gid %d, %+v\n", shard, gid, kv.me, kv.gid, curConfig)
+
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
 				var reply GetShardReply
 				DPrintf("GetShard req to %s, %+v", servers[si], args)
+				//fmt.Printf("GetShard req to %s, %+v\n", servers[si], args)
+
 				ok := srv.Call("ShardKV.GetShard", &args, &reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
-					//kv.deleteShard(config, shard)
+					//fmt.Printf("Done GetShard req to %s, %+v %+v\n", servers[si], args, reply)
+
+					kv.deleteShard(config, shard)
 					kv.updateShard(config, shard, reply.Value, reply.Track)
 					return
 				}
-				if kv.isKilled() {
+				if kv.isKilled() || ok && reply.WrongLeader == false && reply.Err == ErrAlreadyDone {
+					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
+					//fmt.Printf("Ignore GetShard req to %s, %+v %+v\n", servers[si], args, reply)
 					return
 				}
 			}
@@ -570,8 +599,12 @@ func (kv *ShardKV) updateConfig() {
 		return
 	}
 	DPrintf("begin startConfig me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
+	//fmt.Printf("begin startConfig me: %d gid: %d cur:%+v, next:%+v\n", kv.me, kv.gid, kv.curConfig(), config)
+
 	kv.startConfig(config)
 	DPrintf("begin updateShark me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
+	//fmt.Printf("begin updateShark me: %d gid: %d cur:%+v, next:%+v\n", kv.me, kv.gid, kv.curConfig(), config)
+
 	dones := make(chan struct{}, shardmaster.NShards)
 	for i := 0; i < shardmaster.NShards; i ++ {
 		go kv.getShard(config, i, dones)
@@ -579,10 +612,16 @@ func (kv *ShardKV) updateConfig() {
 	for i := 0; i < shardmaster.NShards; i ++ {
 		<-dones
 		DPrintf("end 1 updateShark me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
+		//fmt.Printf("end 1 updateShark me: %d gid: %d cur:%+v, next:%+v\n", kv.me, kv.gid, kv.curConfig(), config)
+
 	}
 	DPrintf("begin endConfig me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
+	//fmt.Printf("begin endConfig me: %d gid: %d cur:%+v, next:%+v\n", kv.me, kv.gid, kv.curConfig(), config)
+
 	kv.endConfig(config.Num)
 	DPrintf("end endConfig me: %d gid: %d cur:%+v, next:%+v", kv.me, kv.gid, kv.curConfig(), config)
+	//fmt.Printf("end endConfig me: %d gid: %d cur:%+v, next:%+v\n", kv.me, kv.gid, kv.curConfig(), config)
+
 }
 
 func (kv *ShardKV) pollConfig() {
@@ -659,6 +698,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 	labgob.Register(shardmaster.Config{})
+	labgob.Register(ShardTrackItem{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -688,7 +728,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	for s := range kv.ClerkTrack {
 		kv.ClerkTrack[s] = make(map[int64]int)
 	}
-	kv.ShardTrack = [shardmaster.NShards]int{}
+	kv.ShardTrack = [shardmaster.NShards]ShardTrackItem{}
 	kv.issueing = make(chan KVRPCIssueItem)
 	kv.committing = make(chan KVRPCCommitItem, 1)
 	kv.ctx, kv.cancel = context.WithCancel(context.Background())
