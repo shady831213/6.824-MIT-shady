@@ -314,7 +314,7 @@ func (kv *ShardKV) EndConfig(args *EndConfigArgs, reply *ConfigReply) {
 
 }
 
-func (kv *ShardKV) migrateReqs(args interface{}, name string, rpc func(int) (bool, int)) {
+func (kv *ShardKV) internalReqs(args interface{}, name string, rpc func(int) (bool, int)) {
 	server := kv.me
 	for {
 		DPrintf("%s req to %d gid: %d, %+v", name, server, kv.gid, args)
@@ -342,7 +342,7 @@ func (kv *ShardKV) updateShard(config shardmaster.Config, shard int, value map[s
 	args.Value = value
 	args.Track = track
 
-	kv.migrateReqs(args, "UpdateShard", func(server int) (bool, int) {
+	kv.internalReqs(args, "UpdateShard", func(server int) (bool, int) {
 		var reply UpdateShardReply
 		if server == kv.me {
 			kv.UpdateShard(&args, &reply)
@@ -358,7 +358,7 @@ func (kv *ShardKV) startConfig(config shardmaster.Config) {
 	args := StartConfigArgs{}
 	args.Config = config
 
-	kv.migrateReqs(args, "StartConfig", func(server int) (bool, int) {
+	kv.internalReqs(args, "StartConfig", func(server int) (bool, int) {
 		var reply ConfigReply
 		if server == kv.me {
 			kv.StartConfig(&args, &reply)
@@ -374,7 +374,7 @@ func (kv *ShardKV) endConfig(configNum int) {
 	args := EndConfigArgs{}
 	args.ConfigNum = configNum
 
-	kv.migrateReqs(args, "EndConfig", func(server int) (bool, int) {
+	kv.internalReqs(args, "EndConfig", func(server int) (bool, int) {
 		var reply ConfigReply
 		if server == kv.me {
 			kv.EndConfig(&args, &reply)
@@ -386,29 +386,17 @@ func (kv *ShardKV) endConfig(configNum int) {
 	})
 }
 
-func (kv *ShardKV) deleteShard(config shardmaster.Config, shard int) {
-	args := DeleteShardArgs{}
-	args.Shard = shard
-	args.Gid = int64(kv.gid)
-	args.ConfigNum = config.Num
+func (kv *ShardKV) externalReqs(name string, shard int, rpc func(*labrpc.ClientEnd) bool) {
 	curConfig := kv.curConfig()
 	for {
-		args.ConfigNum = config.Num
 		gid := curConfig.Shards[shard]
 		if servers, ok := curConfig.Groups[gid]; ok {
-			DPrintf("DeleteShard %d req to gid %d me %d, gid %d, %+v", shard, gid, kv.me, kv.gid, curConfig)
-			//fmt.Printf("DeleteShard %d req to gid %d me %d, gid %d, %+v\n", shard, gid, kv.me, kv.gid, curConfig)
-
+			DPrintf("%s %d req to gid %d me %d, gid %d, %+v", name, shard, gid, kv.me, kv.gid, curConfig)
 			for si := 0; si < len(servers); si++ {
 				srv := kv.make_end(servers[si])
-				var reply DeleteShardReply
-				DPrintf("DeleteShard req to %s, %+v", servers[si], args)
-				//fmt.Printf("DeleteShard req to %s, %+v\n", servers[si], args)
-
-				ok := srv.Call("ShardKV.DeleteShard", &args, &reply)
-				if ok && reply.WrongLeader == false && reply.Err == OK {
-					DPrintf("Done DeleteShard req to %s, %+v", servers[si], args)
-					//fmt.Printf("Done DeleteShard req to %s, %+v %+v\n", servers[si], args, reply)
+				DPrintf("%s req to %s", name, servers[si])
+				if rpc(srv) {
+					DPrintf("Done %s req to %s", name, servers[si])
 					return
 				}
 				if kv.isKilled() {
@@ -420,12 +408,45 @@ func (kv *ShardKV) deleteShard(config shardmaster.Config, shard int) {
 	}
 }
 
-func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan struct{}) {
+func (kv *ShardKV) deleteShard(config shardmaster.Config, shard int) {
+	args := DeleteShardArgs{}
+	args.Shard = shard
+	args.Gid = int64(kv.gid)
+	args.ConfigNum = config.Num
+	kv.externalReqs("DeleteShard", shard, func(srv *labrpc.ClientEnd) bool {
+		var reply DeleteShardReply
+		ok := srv.Call("ShardKV.DeleteShard", &args, &reply)
+		if ok && reply.WrongLeader == false && reply.Err == OK {
+			return true
+		}
+		return false
+	})
+}
+
+func (kv *ShardKV) getShard(config shardmaster.Config, shard int) {
 	args := GetShardArgs{}
 	args.Shard = shard
 	args.Gid = int64(kv.gid)
+	args.ConfigNum = config.Num
+	kv.externalReqs("GetShard", shard, func(srv *labrpc.ClientEnd) bool {
+		var reply GetShardReply
+		ok := srv.Call("ShardKV.GetShard", &args, &reply)
+		if ok && reply.WrongLeader == false && reply.Err == OK {
+			kv.updateShard(config, shard, reply.Value, reply.Track)
+			kv.deleteShard(config, shard)
+			return true
+		}
+		if ok && reply.WrongLeader == false && reply.Err == ErrAlreadyDone {
+			return true
+		}
+		return false
+	})
+}
+
+func (kv *ShardKV) migrateShards(config shardmaster.Config, shard int, done chan struct{}) {
 	defer func() { done <- struct{}{} }()
 	curConfig := kv.curConfig()
+	// Unaffected
 	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] == kv.gid ||
 		curConfig.Shards[shard] != kv.gid && config.Shards[shard] != kv.gid ||
 		curConfig.Num == 0 {
@@ -433,6 +454,7 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 		return
 	}
 
+	// migrate out
 	if curConfig.Shards[shard] == kv.gid && config.Shards[shard] != kv.gid {
 		for track := kv.shadTrack(shard); config.Num != track.ConfigNum || track.State != ShardDelete; track = kv.shadTrack(shard) {
 			if kv.isKilled() {
@@ -443,36 +465,8 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 		return
 	}
 
-	for {
-		args.ConfigNum = config.Num
-		gid := curConfig.Shards[shard]
-		if servers, ok := curConfig.Groups[gid]; ok {
-			DPrintf("GetShard %d req to gid %d me %d, gid %d, %+v", shard, gid, kv.me, kv.gid, curConfig)
-			//fmt.Printf("GetShard %d req to gid %d me %d, gid %d, %+v\n", shard, gid, kv.me, kv.gid, curConfig)
-
-			for si := 0; si < len(servers); si++ {
-				srv := kv.make_end(servers[si])
-				var reply GetShardReply
-				DPrintf("GetShard req to %s, %+v", servers[si], args)
-				//fmt.Printf("GetShard req to %s, %+v\n", servers[si], args)
-
-				ok := srv.Call("ShardKV.GetShard", &args, &reply)
-				if ok && reply.WrongLeader == false && reply.Err == OK {
-					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
-					//fmt.Printf("Done GetShard req to %s, %+v %+v\n", servers[si], args, reply)
-					kv.updateShard(config, shard, reply.Value, reply.Track)
-					kv.deleteShard(config, shard)
-					return
-				}
-				if kv.isKilled() || ok && reply.WrongLeader == false && reply.Err == ErrAlreadyDone {
-					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
-					//fmt.Printf("Ignore GetShard req to %s, %+v %+v\n", servers[si], args, reply)
-					return
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	// migrate in
+	kv.getShard(config, shard)
 }
 
 func (kv *ShardKV) execute(op *Op) (interface{}, Err) {
@@ -606,7 +600,7 @@ func (kv *ShardKV) updateConfig() {
 
 	dones := make(chan struct{}, shardmaster.NShards)
 	for i := 0; i < shardmaster.NShards; i ++ {
-		go kv.getShard(config, i, dones)
+		go kv.migrateShards(config, i, dones)
 	}
 	for i := 0; i < shardmaster.NShards; i ++ {
 		<-dones
