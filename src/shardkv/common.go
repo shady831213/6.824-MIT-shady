@@ -85,6 +85,19 @@ type GetShardReply struct {
 	Server      int
 }
 
+type DeleteShardArgs struct {
+	Shard     int
+	Gid       int64
+	ConfigNum int
+}
+
+type DeleteShardReply struct {
+	WrongLeader bool
+	Err         Err
+	Leader      int
+	Server      int
+}
+
 type UpdateShardArgs struct {
 	ConfigNum int
 	Shard     int

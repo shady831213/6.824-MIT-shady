@@ -19,6 +19,7 @@ const (
 	PUT         = "Put"
 	APPEND      = "Append"
 	GETSHARD    = "GetShard"
+	DELETESHARD = "DeleteShard"
 	UPDATESHARD = "UpdateShard"
 	STARTCONFIG = "StartConfig"
 	ENDCONFIG   = "EndConfig"
@@ -278,6 +279,11 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 
 }
 
+func (kv *ShardKV) DeleteShard(args *DeleteShardArgs, reply *DeleteShardReply) {
+	kv.issueRPC(DELETESHARD, args, reply)
+
+}
+
 func (kv *ShardKV) UpdateShard(args *UpdateShardArgs, reply *UpdateShardReply) {
 	kv.issueRPC(UPDATESHARD, args, reply)
 
@@ -365,6 +371,35 @@ func (kv *ShardKV) endConfig(configNum int) {
 	})
 }
 
+func (kv *ShardKV) deleteShard(config shardmaster.Config, shard int) {
+	args := DeleteShardArgs{}
+	args.Shard = shard
+	args.Gid = int64(kv.gid)
+	args.ConfigNum = config.Num
+	curConfig := kv.curConfig()
+	for {
+		args.ConfigNum = config.Num
+		gid := curConfig.Shards[shard]
+		if servers, ok := curConfig.Groups[gid]; ok {
+			DPrintf("DeleteShard %d req to gid %d me %d, gid %d, %+v", shard, gid, kv.me, kv.gid, curConfig)
+			for si := 0; si < len(servers); si++ {
+				srv := kv.make_end(servers[si])
+				var reply DeleteShardReply
+				DPrintf("DeleteShard req to %s, %+v", servers[si], args)
+				ok := srv.Call("ShardKV.DeleteShard", &args, &reply)
+				if ok && reply.WrongLeader == false && reply.Err == OK {
+					DPrintf("Done DeleteShard req to %s, %+v", servers[si], args)
+					return
+				}
+				if kv.isKilled() {
+					return
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan struct{}) {
 	args := GetShardArgs{}
 	args.Shard = shard
@@ -399,6 +434,7 @@ func (kv *ShardKV) getShard(config shardmaster.Config, shard int, done chan stru
 				ok := srv.Call("ShardKV.GetShard", &args, &reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					DPrintf("Done GetShard req to %s, %+v", servers[si], args)
+					//kv.deleteShard(config, shard)
 					kv.updateShard(config, shard, reply.Value, reply.Track)
 					return
 				}
@@ -637,6 +673,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.registerRPC(PUT, new(PugAppend))
 	kv.registerRPC(APPEND, new(PugAppend))
 	kv.registerRPC(GETSHARD, new(GetShard))
+	kv.registerRPC(DELETESHARD, new(DeleteShard))
 	kv.registerRPC(UPDATESHARD, new(UpdateShard))
 	kv.registerRPC(STARTCONFIG, new(StartConfig))
 	kv.registerRPC(ENDCONFIG, new(EndConfig))

@@ -139,6 +139,9 @@ func (rf *Raft) logIndex(i int) int {
 func (rf *Raft) lastLogEntryInfo() (int, int) {
 	lastIndex := len(rf.logs) - 1
 	lastTerm := rf.logs[lastIndex].Term
+	if lastIndex == 0 {
+		lastTerm = rf.snapshot.Term
+	}
 	return rf.logIndex(lastIndex), lastTerm
 }
 
@@ -251,35 +254,19 @@ func (rf *Raft) readSnapshot(data []byte) {
 	}
 }
 
-func (rf *Raft) makeSnapshot(index int, term int, snapshotData []byte) {
+func (rf *Raft) makeSnapshot(index int, snapshotData []byte) {
 	if index <= rf.snapshot.Index {
 		return
 	}
-	//_, file, line, _ := runtime.Caller(0)
-	//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 	if rf.logPosition(index) < len(rf.logs) {
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 		rf.snapshot.Term = rf.logs[rf.logPosition(index)].Term
-		//_, file, line, _ = runtime.Caller(0)
-		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
-		//fmt.Printf("%s%d before set logs %+v %s, %d\n", rf.Tag, rf.me, rf.logs, file, line)
 		rf.logs = append([]RaftLogEntry{{0, 0}}, rf.logs[rf.logPosition(index+1):]...)
-		//fmt.Printf("%s%d after set logs %+v  %s, %d\n", rf.Tag, rf.me, rf.logs, file, line)
-
+		rf.snapshot.Data = snapshotData
+		rf.snapshot.Index = index
+		rf.persist()
 	} else {
-		rf.snapshot.Term = term
-		//_, file, line, _ := runtime.Caller(0)
-		//fmt.Printf("%s%d set logs %s, %d\n", rf.Tag, rf.me, file, line)
-		//fmt.Printf("%s%d before set logs %+v  index:%d snapshot index:%d term:%+v %s, %d\n", rf.Tag, rf.me, rf.logs, index, rf.snapshot.Index, term, file, line)
-		rf.logs = []RaftLogEntry{{0, 0}}
-		//panic(fmt.Sprintf("%s%d after set logs %+v  %s, %d", rf.Tag, rf.me, rf.logs, file, line))
+		panic(fmt.Sprintf("%s%d after set logs %+v ", rf.Tag, rf.me, rf.logs))
 	}
-	rf.snapshot.Data = snapshotData
-	//_, file, line, _ := runtime.Caller(0)
-	//fmt.Printf("%s%d change snapshot from %d to %d %s, %d\n", rf.Tag, rf.me, rf.snapshot.Index, index, file, line)
-	rf.snapshot.Index = index
-	rf.persist()
 }
 
 func (rf *Raft) getElectionTimeout() time.Duration {
@@ -292,13 +279,18 @@ func (rf *Raft) apply() {
 	entries := make([]ApplyMsg, 0)
 	lastApplied := rf.lastApplied + 1
 	RaftDebug("server", rf.me, "apply, lastAppliy", rf.lastApplied, "commitIndex", rf.commitIndex)
+	if rf.logPosition(rf.commitIndex) > len(rf.logs)-1 {
+		panic(fmt.Sprintf("%s%d update commit to %d log %+v snapshotindex %d", rf.Tag, rf.me, rf.commitIndex, rf.logs, rf.snapshot.Index))
+	}
 	if rf.lastApplied < rf.commitIndex {
 		if rf.lastApplied <= rf.snapshot.Index && rf.snapshot.Index != 0 {
 			entries = append(entries, ApplyMsg{false, rf.snapshot.Data, rf.snapshot.Index, rf.snapshot.Term, 0, true})
 			lastApplied = rf.snapshot.Index + 1
 		}
 		if lastApplied <= rf.commitIndex {
-			//fmt.Println("server", rf.Tag, rf.me, "logs", rf.logs, "start", rf.logPosition(lastApplied), lastApplied, "end", rf.logPosition(rf.commitIndex), rf.commitIndex, "snapshotIdex", rf.snapshot.Index)
+			if rf.logPosition(lastApplied) > len(rf.logs)-1 || rf.logPosition(rf.commitIndex) > len(rf.logs)-1 {
+				panic(fmt.Sprint("server", rf.Tag, rf.me, "logslen", len(rf.logs), "start", rf.logPosition(lastApplied), lastApplied, "end", rf.logPosition(rf.commitIndex), rf.commitIndex, "snapshotIdex", rf.snapshot.Index))
+			}
 			//_, file, line, _ := runtime.Caller(0)
 			//fmt.Printf("%s%d get logs %s, %d\n", rf.Tag, rf.me, file, line)
 			commitEntris := rf.logs[rf.logPosition(lastApplied) : rf.logPosition(rf.commitIndex)+1]

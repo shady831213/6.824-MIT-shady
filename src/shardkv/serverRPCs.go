@@ -213,6 +213,7 @@ func (r *GetShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
 
 		func() bool {
 			if args.ConfigNum > r.kv.nextConfig().Num {
+				reply.Server = r.kv.me
 				reply.WrongLeader = true
 				DPrintf("retry GetShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.nextConfig())
 				return false
@@ -249,6 +250,71 @@ func (r *GetShard) execute(op *Op) (interface{}, Err) {
 	}
 
 	r.kv.updateShadTrack(shard, op.SeqId)
+	return value, OK
+}
+
+type DeleteShard struct {
+	ShardKVRPCBase
+}
+
+func (r *DeleteShard) op(ar interface{}, rp interface{}) KVRPCIssueItem {
+	args := ar.(*DeleteShardArgs)
+	reply := rp.(*DeleteShardReply)
+	return KVRPCIssueItem{
+		kvRPCItem{&Op{DELETESHARD, r.kv.me, args.Gid, args.ConfigNum,
+			r.encodeArgs(func(e *labgob.LabEncoder) {
+				e.Encode(args.Shard)
+
+			}),},
+			func(resp KVRPCResp) {
+				reply.Server = r.kv.me
+				reply.Err = resp.err
+				reply.WrongLeader = resp.wrongLeader
+				reply.Leader = resp.leader
+				DPrintf("reply DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
+
+			},
+			make(chan struct{})},
+
+		func() bool {
+			//fmt.Printf("check DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
+			if args.ConfigNum != r.kv.shadTrack(args.Shard) {
+				reply.Server = r.kv.me
+				reply.WrongLeader = true
+				//DPrintf("retry DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard)
+				//fmt.Printf("retry DeleteShard me: %d gid: %d %+v %+v\n", r.kv.me, r.kv.gid, args, r.kv.shadTrack(args.Shard))
+				return false
+			}
+			return true
+		},
+
+		func(leader int) {
+			reply.Server = r.kv.me
+			reply.WrongLeader = true
+			reply.Leader = leader
+			DPrintf("NotLeader DeleteShard me: %d gid: %d %+v %+v", r.kv.me, r.kv.gid, args, reply)
+
+		},
+	}
+}
+
+func (r *DeleteShard) execute(op *Op) (interface{}, Err) {
+	shard := 0
+	value := GetShardValue{make(map[string]string), make(map[int64]int)}
+	r.decodeArgs(op.Value, func(d *labgob.LabDecoder) {
+		if e := d.Decode(&shard); e != nil {
+			panic(e)
+		}
+	})
+
+	for k, _ := range r.kv.DB {
+		if key2shard(k) == shard {
+			delete(r.kv.DB, k)
+		}
+	}
+	r.kv.mu.Lock()
+	r.kv.ClerkTrack[shard] = make(map[int64]int)
+	r.kv.mu.Unlock()
 	return value, OK
 }
 
