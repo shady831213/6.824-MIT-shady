@@ -180,9 +180,10 @@ func (kv *KVServer) issue(item KVRPCIssueItem) {
 	if !item.preIssueCheck() {
 		return
 	}
-
+	kv.mu.Lock()
 	index, _, isLeader, leader := kv.rf.Start(*item.op)
 	if !isLeader {
+		kv.mu.Unlock()
 		item.wrongLeaderHandler(leader)
 		return
 
@@ -194,7 +195,7 @@ func (kv *KVServer) issue(item KVRPCIssueItem) {
 			make(chan struct{}),
 		},
 	}
-	kv.mu.Lock()
+
 	kv.pendingIndex = index
 	kv.mu.Unlock()
 	kv.committing <- commit
