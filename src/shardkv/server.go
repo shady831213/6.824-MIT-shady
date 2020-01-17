@@ -227,7 +227,7 @@ func (kv *ShardKV) checkGroup(key string) bool {
 	_, newExistGroup := kv.NextConfig.Groups[kv.gid]
 	shard := key2shard(key)
 	DPrintf("checkGroup me: %d gid: %d config:%+v, nextconfig:%+v, track:%+v", kv.me, kv.gid, kv.Config, kv.NextConfig, kv.ShardTrack)
-	ok := (kv.Config.Shards[shard] == kv.gid) && (kv.NextConfig.Shards[shard] == kv.gid) && existGroup && newExistGroup && (kv.Config.Num == kv.NextConfig.Num)
+	ok := (kv.Config.Shards[shard] == kv.gid) && (kv.NextConfig.Shards[shard] == kv.gid) && existGroup && newExistGroup
 	return ok
 
 }
