@@ -13,6 +13,21 @@ if the origin repo can't be access, use following command can get it:
 git checkout 8573c99cec9a0993c025ad385e6fbc9c7526a394
 ```
 
+## Status
+- [x] Lab 1
+- [x] Lab 2
+- [x] Lab 3
+- [x] Lab 4
+  - [x] Challenge 1
+  - [x] Challenge 2
+
+## Performance
+ env is a 8 G 4 cores Unbuntu16.04 Virtual Machine.
+ - Lab1
+ - Lab 2
+ - Lab 3
+ - Lab 4 with 2 challenges
+  
 ## others
 There is a ConsistentHash and RBTree implementation with tests in shardmaster. RBTree is refer to https://github.com/shady831213/algorithms/tree/master/tree/binaryTree
 
