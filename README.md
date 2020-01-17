@@ -22,7 +22,7 @@ git checkout 8573c99cec9a0993c025ad385e6fbc9c7526a394
   - [x] Challenge 2
 
 ## Performance
- env is a 8 G 4 cores Unbuntu16.04 Virtual Machine.
+ env is a 8 G 4 cores Unbuntu16.04 Virtual Machine on a laptop.
  - Lab1
  
  ![](https://github.com/shady831213/6.824-MIT-shady/blob/master/resources/Lab1.PNG)
