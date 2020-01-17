@@ -223,11 +223,11 @@ func (kv *ShardKV) shadTrack(shard int) ShardTrackItem {
 func (kv *ShardKV) checkGroup(key string) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	_, existGroup := kv.Config.Groups[kv.gid]
 	_, newExistGroup := kv.NextConfig.Groups[kv.gid]
 	shard := key2shard(key)
+	track := kv.ShardTrack[shard]
 	DPrintf("checkGroup me: %d gid: %d config:%+v, nextconfig:%+v, track:%+v", kv.me, kv.gid, kv.Config, kv.NextConfig, kv.ShardTrack)
-	ok := (kv.Config.Shards[shard] == kv.gid) && (kv.NextConfig.Shards[shard] == kv.gid) && existGroup && newExistGroup
+	ok :=  (kv.NextConfig.Shards[shard] == kv.gid) && newExistGroup && track.State == ShardInit && track.ConfigNum == kv.NextConfig.Num
 	return ok
 
 }
